@@ -1,0 +1,40 @@
+argcomplete @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_argcomplete_1786180543/work
+argh @ file:///home/conda/feedstock_root/build_artifacts/argh_1736349233934/work
+biocode==0.12.1
+biopython @ file:///home/conda/feedstock_root/build_artifacts/biopython_1720014906935/work
+certifi==2026.7.22
+charset-normalizer==3.5.1
+colorama @ file:///home/conda/feedstock_root/build_artifacts/colorama_1733218098505/work
+contourpy==1.3.3
+cycler==0.12.1
+edlib @ file:///opt/conda/conda-bld/python-edlib_1772444180384/work
+fonttools==4.64.0
+gffutils @ file:///opt/conda/conda-bld/gffutils_1713032375036/work
+idna==3.19
+igraph==1.0.0
+importlib_metadata @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_importlib-metadata_1787943971/work
+intbitset==3.1.0
+Jinja2==3.1.6
+joblib @ file:///home/conda/feedstock_root/build_artifacts/joblib_1733736026804/work
+kiwisolver==1.5.1
+MarkupSafe==3.0.3
+matplotlib==3.11.1
+networkx @ file:///home/conda/feedstock_root/build_artifacts/networkx_1712540363324/work
+numpy @ file:///home/conda/feedstock_root/build_artifacts/numpy_1707225376651/work/dist/numpy-1.26.4-cp311-cp311-linux_x86_64.whl#sha256=d08e1c9e5833ae7780563812aa73e2497db1ee3bd5510d3becb8aa18aa2d0c7c
+packaging @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_packaging_1785888127/work
+peewee==4.4.0
+pillow==12.3.0
+pyfaidx @ file:///opt/conda/conda-bld/pyfaidx_1773947573312/work
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+python-igraph==1.0.0
+PyVCF3 @ file:///opt/conda/conda-bld/pyvcf3_1749468283042/work
+requests==2.34.2
+scipy @ file:///home/conda/feedstock_root/build_artifacts/scipy-split_1733620549877/work/dist/scipy-1.14.1-cp311-cp311-linux_x86_64.whl#sha256=9cf7bd1914414126f9769147b538822d0a1071c56563b867828a3c44ecca0702
+simplejson @ file:///home/conda/feedstock_root/build_artifacts/simplejson_1787824072008/work
+six @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_six_1753199211/work
+taxadb==0.12.1
+texttable==1.7.0
+tqdm @ file:///home/conda/feedstock_root/build_artifacts/tqdm_1722737464726/work
+urllib3==2.7.0
+zipp @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_zipp_1779159948/work

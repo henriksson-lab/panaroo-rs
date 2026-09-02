@@ -1,0 +1,5 @@
+/target
+/panaroo
+*.json
+!port_order.csv
+/tests/parity/build

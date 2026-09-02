@@ -1,0 +1,423 @@
+Tier D (determinism) — replace arbitrary `set` iteration with sorted order
+
+Panaroo iterates Python `set`s at points where the order reaches either the output or the
+control flow. For `set[str]` (the `seqIDs` sets) CPython's order depends on the per-process
+hash seed, so two runs on identical input produce different files unless PYTHONHASHSEED is
+pinned. For `set[int]` the order is deterministic but arbitrary.
+
+This patch makes the order canonical everywhere it is observable, so the reference is
+reproducible and so the Rust port can use ordinary sorted containers instead of emulating
+CPython's set table. See PORTING_PLAN.md 6.0.2 and ORIGINAL_CODE_BUG.md B6.
+
+Sites, from an AST audit of the twelve modules reachable from __main__.main (a plain grep
+misses the ones split across lines):
+
+  STRUCTURAL -- order changes the resulting pangenome, not just its rendering
+    clean_network.py:170   temp_node_list = list(search_space)
+                           seeds the BFS in collapse_families, so it decides which merges
+                           are attempted
+    clean_network.py:431   merge_node_cluster(G, list(cluster_dict[cluster]), ...)
+                           feeds a *stable* sorted(key=size), so ties resolve by set order,
+                           which selects the consensus node and thus maxLenId/centroid[0]
+    clean_network.py:467   merge_node_cluster(G, temp_c, ...) -- temp_c is a set, same issue
+    clean_network.py:77    l = list(set(labels[...])); l[0] is the label every other label
+                           in the group is rewritten to, which shifts np.unique() ordering
+                           and therefore node_count assignment
+    merge_nodes.py:126,145 mem_edges = list(set([...])) in delete_node and
+                           remove_member_from_node. These synthesise edges pairwise, so the
+                           order decides adjacency insertion order, which decides neighbour
+                           order, which decides BFS order in collapse_families.
+    find_missing.py:150,168  for node in bad_nodes: delete_node(G, node)
+                           delete_node synthesises edges, so deletion order changes the
+                           resulting edge set
+
+  OUTPUT-VISIBLE -- same graph, different rendering
+    isvalid.py:172         custom_stringizer's `set` branch iterates the set directly.
+                           This one only shows up in pre_filt_graph.gml, where seqIDs is
+                           still a Python set (main converts it to a list only before the
+                           *final* GML write), so the stringizer renders it in set order.
+                           Missed on the first pass; found by the cross-seed acceptance
+                           test, which is why that test exists.
+    __main__.py:394,553    geneIDs = ";".join(seqIDs)          -> both GML files
+    __main__.py:556        seqIDs = list(seqIDs)               -> final_graph.gml
+    generate_output.py:68  for node in component               -> entry_count, hence row order
+    generate_output.py:108 for seq in seqIDs                   -> presence/absence cells
+
+  ALIGNMENT PATH -- only reached with --alignment, which is why the first pass missed
+  these: the determinism acceptance test runs a default (no-alignment) pipeline.
+    generate_output.py:405   alignment_filenames = os.listdir(alignments_dir)
+                           FILESYSTEM order, not even deterministic across machines. It
+                           fixes gene_alignments order, hence the column order of
+                           core_gene_alignment.aln and the coordinates in
+                           core_alignment_header.embl.
+    generate_output.py:436,458  for iso in isolates -- a set[str]; fixes the ROW order of
+                           core_gene_alignment.aln
+    generate_alignments.py:855,885  os.listdir(outdir + 'aligned_gene_sequences/')
+
+  DEFENSIVE -- the result is order-independent, but sorting removes the need to prove it
+    clean_network.py:139,153  seqid_to_index / node_mem_index construction. Both are dict
+                           assignments and set adds, so content does not depend on order --
+                           but the resulting dict key order does, and node_mem_index is
+                           iterated later. Sorting makes that structural.
+    clean_network.py:516   identify_possible_highly_variable. Not reachable from
+                           __main__.main; patched for consistency within the module.
+
+Deliberately NOT patched (audited, order is not observable):
+    clean_network.py:29        bad_nodes is a list, not a set
+    merge_nodes.py:158         set comprehension; the result is a set
+    generate_alignments.py:769 list(set([dna_id, protein_id])) feeds seqids_to_remove,
+                               which is only ever membership-tested
+    find_missing.py:52,77      already sorted() upstream
+
+NOTE: sorted() on str is lexicographic by code point, so seqIDs sort "10_1_2" before
+"9_1_2". The Rust port must reproduce that, not a natural sort.
+
+Status: ALWAYS ON. Without this there is no stable reference to compare against.
+
+diff --git a/panaroo/__main__.py b/panaroo/__main__.py
+index de9b2d0..596af82 100755
+--- a/panaroo/__main__.py
++++ b/panaroo/__main__.py
+@@ -388,13 +388,13 @@ def main():
+ 
+     # write out pre-filter graph in GML format
+     for node in G.nodes():
+         G.nodes[node]['size'] = len(G.nodes[node]['members'])
+         G.nodes[node]['genomeIDs'] = ";".join(
+             [str(m) for m in G.nodes[node]['members']])
+-        G.nodes[node]['geneIDs'] = ";".join(G.nodes[node]['seqIDs'])
++        G.nodes[node]['geneIDs'] = ";".join(sorted(G.nodes[node]['seqIDs']))
+         G.nodes[node]['degrees'] = G.degree[node]
+     for edge in G.edges():
+         G.edges[edge[0], edge[1]]['genomeIDs'] = ";".join(
+             [str(m) for m in G.edges[edge[0], edge[1]]['members']])
+     nx.write_gml(G,
+                  args.output_dir + "pre_filt_graph.gml",
+@@ -547,16 +547,16 @@ def main():
+         G.nodes[node]['centroid'] = ";".join(G.nodes[node]['centroid'])
+         G.nodes[node]['dna'] = ";".join(conv_list(G.nodes[node]['dna']))
+         G.nodes[node]['protein'] = ";".join(conv_list(
+             G.nodes[node]['protein']))
+         G.nodes[node]['genomeIDs'] = ";".join(
+             [str(m) for m in G.nodes[node]['members']])
+-        G.nodes[node]['geneIDs'] = ";".join(G.nodes[node]['seqIDs'])
++        G.nodes[node]['geneIDs'] = ";".join(sorted(G.nodes[node]['seqIDs']))
+         G.nodes[node]['degrees'] = G.degree[node]
+         G.nodes[node]['members'] = list(G.nodes[node]['members'])
+-        G.nodes[node]['seqIDs'] = list(G.nodes[node]['seqIDs'])
++        G.nodes[node]['seqIDs'] = sorted(G.nodes[node]['seqIDs'])
+ 
+     for edge in G.edges():
+         G.edges[edge[0], edge[1]]['genomeIDs'] = ";".join(
+             [str(m) for m in G.edges[edge[0], edge[1]]['members']])
+         G.edges[edge[0],
+                 edge[1]]['members'] = list(G.edges[edge[0],
+diff --git a/panaroo/clean_network.py b/panaroo/clean_network.py
+index 0a52d07..abf21f2 100755
+--- a/panaroo/clean_network.py
++++ b/panaroo/clean_network.py
+@@ -71,13 +71,13 @@ def single_linkage(G, distances_bwtn_centroids, centroid_to_index, neighbours):
+     n_components, labels = connected_components(
+         csgraph=distances_bwtn_centroids[index][:, index],
+         directed=False,
+         return_labels=True)
+     # labels = labels[index]
+     for neigh in neighbours:
+-        l = list(set(labels[neigh_array == neigh]))
++        l = sorted(set(labels[neigh_array == neigh]))
+         if len(l) > 1:
+             for i in l[1:]:
+                 labels[labels == i] = l[0]
+ 
+     clusters = [
+         del_dups(list(neigh_array[labels == i])) for i in np.unique(labels)
+@@ -133,13 +133,13 @@ def collapse_families(G,
+         distances_bwtn_centroids, centroid_to_index = pwdist_edlib(
+             G, cdhit_clusters, family_threshold, dna=False, n_cpu=n_cpu)
+ 
+     # keep track of centroids for each sequence. Need this to resolve clashes
+     seqid_to_index = {}
+     for node in G.nodes():
+-        for sid in G.nodes[node]['seqIDs']:
++        for sid in sorted(G.nodes[node]['seqIDs']):
+             if "refound" in sid:
+                 seqid_to_index[sid] = centroid_to_index[G.nodes[node]
+                                                         ["longCentroidID"][1]]
+             else:
+                 seqid_to_index[sid] = centroid_to_index[seqid_to_centroid[sid]]
+ 
+@@ -147,13 +147,13 @@ def collapse_families(G,
+     nonzero_dist = set([(i, j)
+                         for i, j in zip(nonzero_dist[0], nonzero_dist[1])])
+ 
+     node_mem_index = {}
+     for n in G.nodes():
+         node_mem_index[n] = defaultdict(set)
+-        for sid in G.nodes[n]['seqIDs']:
++        for sid in sorted(G.nodes[n]['seqIDs']):
+             node_mem_index[n][int(sid.split("_")[0])].add(seqid_to_index[sid])
+ 
+     for depth in depths:
+         if not quiet: print("Processing depth: ", depth)
+         if search_genome_ids is None:
+             search_space = set(G.nodes())
+@@ -164,13 +164,13 @@ def collapse_families(G,
+                 if len(G.nodes[n]['members'].intersection(search_genome_ids))>0:
+                     search_space.add(n)
+             
+         iteration_num = 1
+         while len(search_space) > 0:
+             # look for nodes to merge
+-            temp_node_list = list(search_space)
++            temp_node_list = sorted(search_space)
+             removed_nodes = set()
+             if not quiet: print("Iteration: ", iteration_num)
+             iteration_num += 1
+             for node in tqdm(temp_node_list, disable=quiet):
+                 if node in removed_nodes: continue
+ 
+@@ -425,13 +425,13 @@ def collapse_paralogs(G, centroid_contexts, max_context=5, quiet=False):
+ 
+         # merge
+         for cluster in cluster_dict:
+             if len(cluster_dict[cluster]) < 2: continue
+             node_count += 1
+ 
+-            G = merge_node_cluster(G, list(cluster_dict[cluster]), node_count)
++            G = merge_node_cluster(G, sorted(cluster_dict[cluster]), node_count)
+ 
+     return (G)
+ 
+ 
+ def merge_paralogs(G):
+ 
+@@ -465,13 +465,13 @@ def merge_paralogs(G):
+ 
+     # merge paralog nodes that share the same centroid
+     for temp_c in merge_clusters:
+         if len(temp_c) > 1:
+             node_count += 1
+             G = merge_node_cluster(G,
+-                                   temp_c,
++                                   sorted(temp_c),
+                                    node_count,
+                                    check_merge_mems=False)
+ 
+     return (G)
+ 
+ 
+@@ -511,13 +511,13 @@ def identify_possible_highly_variable(G,
+     for node in G.nodes():
+         G.nodes[node]['highVar'] = 0
+ 
+     # find all the cycles shorter than cycle_threshold
+     complete_basis = []
+     for c in nx.connected_components(G):
+-        sub_G = G.subgraph(c)
++        sub_G = G.subgraph(sorted(c))
+         basis = nx.cycle_basis(sub_G, list(sub_G.nodes())[0])
+         complete_basis += [
+             set(b) for b in basis if len(b) <= cycle_threshold_max
+         ]
+ 
+     # remove cycles that are too short
+diff --git a/panaroo/find_missing.py b/panaroo/find_missing.py
+index f9ac6ae..1abe795 100755
+--- a/panaroo/find_missing.py
++++ b/panaroo/find_missing.py
+@@ -144,13 +144,13 @@ def find_missing(G,
+                 seq_coverage[contig_id][loc[0]:loc[1]] = True
+         member += 1
+ 
+     for node in G.nodes():
+         if len(G.nodes[node]['members']) <= 0:
+             bad_nodes.add(node)
+-    for node in bad_nodes:
++    for node in sorted(bad_nodes):
+         if node in G.nodes():
+             delete_node(G, node)
+ 
+     # remove by consensus
+     if remove_by_consensus:
+         if verbose:
+@@ -162,13 +162,13 @@ def find_missing(G,
+                 if node in bad_nodes: continue
+                 if (node, member) in bad_node_mem_pairs: continue
+                 node_hit_counter[node] += 1
+         for node in G:
+             if node_hit_counter[node] > G.nodes[node]['size']:
+                 bad_nodes.add(node)
+-        for node in bad_nodes:
++        for node in sorted(bad_nodes):
+             if node in G.nodes():
+                 delete_node(G, node)
+ 
+     if verbose:
+         print("Updating output...")
+ 
+diff --git a/panaroo/generate_alignments.py b/panaroo/generate_alignments.py
+index 1b560ee..2c90d05 100755
+--- a/panaroo/generate_alignments.py
++++ b/panaroo/generate_alignments.py
+@@ -849,13 +849,13 @@ def reverse_translate_sequences(protein_sequence_files, dna_sequence_files,
+         write_success_failures2 = Parallel(n_jobs=threads, prefer="threads")(
+                 delayed(AlignIO.write)
+                 (missing_sequences_codon_alignments[x], 
+                  outdir + "aligned_gene_sequences/" + x + ".aln.fas", 'fasta')
+                 for x in missing_sequences_codon_alignments)
+         
+-        all_alignments = os.listdir(outdir + "aligned_gene_sequences/")
++        all_alignments = sorted(os.listdir(outdir + "aligned_gene_sequences/"))
+         
+         return all_alignments 
+     
+     #output alignments missing some DNA sequences to tmpdir
+     
+     write_success_failures2 = Parallel(n_jobs=threads, prefer="threads")(
+@@ -879,13 +879,13 @@ def reverse_translate_sequences(protein_sequence_files, dna_sequence_files,
+     print("Aligning untranslatable DNA...")
+     
+     multi_realign_sequences(dna2codons_commands, outdir + "aligned_gene_sequences/",
+                               threads, aligner)
+             
+     
+-    all_alignments = os.listdir(outdir + "aligned_gene_sequences/")
++    all_alignments = sorted(os.listdir(outdir + "aligned_gene_sequences/"))
+     
+     return all_alignments
+ 
+ def write_alignment_header(alignment_list, outdir, filename):
+     out_entries = []
+     # Set the tracking variables for gene positions
+diff --git a/panaroo/generate_output.py b/panaroo/generate_output.py
+index d80dcdf..1f19a26 100755
+--- a/panaroo/generate_output.py
++++ b/panaroo/generate_output.py
+@@ -62,13 +62,13 @@ def generate_roary_gene_presence_absence(
+         pres_abs_list = []
+         entry_sizes = []
+         entry_count = 0
+         for component in nx.connected_components(G):
+             frag += 1
+             count = 0
+-            for node in component:
++            for node in sorted(component):
+                 count += 1
+                 len_mode = max(
+                     G.nodes[node]["lengths"], key=G.nodes[node]["lengths"].count
+                 )
+                 name = "~~~".join(
+                     [
+@@ -102,13 +102,13 @@ def generate_roary_gene_presence_absence(
+                 entry.append(np.min(G.nodes[node]["lengths"]))
+                 entry.append(np.max(G.nodes[node]["lengths"]))
+                 entry.append(np.mean(G.nodes[node]["lengths"]))
+                 pres_abs = [""] * len(isolates)
+                 pres_abs_ext = [""] * len(isolates)
+                 entry_size = 0
+-                for seq in G.nodes[node]["seqIDs"]:
++                for seq in sorted(G.nodes[node]["seqIDs"]):
+                     sample_id = mems_to_index["_".join(seq.split("_")[:-2])]
+                     if pres_abs[sample_id] == "":  # ensures we only take the first one
+                         if seq in orig_ids:
+                             pres_abs[sample_id] = orig_ids[seq]
+                             pres_abs_ext[sample_id] = orig_ids[seq]
+                         else:
+@@ -399,13 +399,13 @@ def calc_hc(col_counts):
+     return(np.sum((1-col_counts[4,:]) * hc)/np.sum(1-col_counts[4,:]))
+ 
+ def concatenate_core_genome_alignments(core_names, output_dir, hc_threshold):
+ 
+     alignments_dir = output_dir + "/aligned_gene_sequences/"
+     # Open up each alignment that is associated with a core node
+-    alignment_filenames = os.listdir(alignments_dir)
++    alignment_filenames = sorted(os.listdir(alignments_dir))
+     core_filenames = [
+         x for x in alignment_filenames if x.split('.')[0] in core_names
+     ]
+     #Read in all these alignments
+     gene_alignments = []
+     isolates = set()
+@@ -430,13 +430,13 @@ def concatenate_core_genome_alignments(core_names, output_dir, hc_threshold):
+                 gene_dict[genome_id] = (record.id, record.seq)
+             
+             isolates.add(genome_id)
+         gene_alignments.append((gene_name, gene_dict, gene_length, calc_hc(col_counts)))
+     # Combine them
+     isolate_aln = []
+-    for iso in isolates:
++    for iso in sorted(isolates):
+         seq = ""
+         for gene in gene_alignments:
+             if iso in gene[1]:
+                 seq += gene[1][iso][1]
+             else:
+                 seq += "-" * gene[2]
+@@ -452,13 +452,13 @@ def concatenate_core_genome_alignments(core_names, output_dir, hc_threshold):
+         q = np.quantile(allh, [0.25,0.75])
+         hc_threshold = max(0.01, q[1] + 1.5*(q[1]-q[0]))
+         print(f"Entropy threshold automatically set to {hc_threshold}.")
+ 
+     isolate_aln = []
+     keep_count = 0 
+-    for iso in isolates:
++    for iso in sorted(isolates):
+         seq = ""
+         for gene in gene_alignments:
+             if gene[3]<=hc_threshold:
+                 keep_count += 1
+                 if iso in gene[1]:
+                     seq += gene[1][iso][1]
+diff --git a/panaroo/isvalid.py b/panaroo/isvalid.py
+index f9b4acc..5e1f297 100755
+--- a/panaroo/isvalid.py
++++ b/panaroo/isvalid.py
+@@ -169,13 +169,13 @@ def custom_stringizer(value):
+                     first = False
+                 stringize(item)
+             buf.write(']')
+         elif isinstance(value, set):
+             buf.write('[')
+             first = True
+-            for item in value:
++            for item in sorted(value):
+                 if not first:
+                     buf.write(',')
+                 else:
+                     first = False
+                 stringize(item)
+             buf.write(']')
+diff --git a/panaroo/merge_nodes.py b/panaroo/merge_nodes.py
+index 9828813..8e956da 100755
+--- a/panaroo/merge_nodes.py
++++ b/panaroo/merge_nodes.py
+@@ -120,13 +120,13 @@ def merge_node_cluster(G,
+     return G
+ 
+ 
+ def delete_node(G, node):
+     # add in new edges
+     for mem in G.nodes[node]['members']:
+-        mem_edges = list(
++        mem_edges = sorted(
+             set([e[1] for e in G.edges(node) if mem in G.edges[e]['members']]))
+         if len(mem_edges) < 2: continue
+         for n1, n2 in itertools.combinations(mem_edges, 2):
+             if G.has_edge(n1, n2):
+                 G[n1][n2]['members'] |= intbitset([mem])
+                 G[n1][n2]['size'] = len(G[n1][n2]['members'])
+@@ -139,13 +139,13 @@ def delete_node(G, node):
+     return G
+ 
+ 
+ def remove_member_from_node(G, node, member):
+ 
+     # add in replacement edges if required
+-    mem_edges = list(
++    mem_edges = sorted(
+         set([e[1] for e in G.edges(node) if member in G.edges[e]['members']]))
+     if len(mem_edges) > 1:
+         for n1, n2 in itertools.combinations(mem_edges, 2):
+             if G.has_edge(n1, n2):
+                 G[n1][n2]['members'] |= intbitset([member])
+                 G[n1][n2]['size'] = len(G[n1][n2]['members'])

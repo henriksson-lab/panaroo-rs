@@ -1,0 +1,56 @@
+# Scripted graph operations, replayed identically by networkx and by support::graph.
+# One op per line. Node ids are integers. Blank lines and '#' comments ignored.
+#
+# The point is ORDER: node insertion order, adjacency insertion order, and the
+# seen-dedup in edges(). Those drive BFS order in collapse_families, which drives
+# which merges happen, which drives node ids in the GML.
+add_node 5
+add_node 3
+add_node 9
+add_node 1
+add_node 7
+add_node 2
+add_edge 5 3
+add_edge 9 1
+add_edge 3 9
+add_edge 5 1
+add_edge 7 2
+dump nodes
+dump edges
+dump neighbors 5
+dump neighbors 3
+dump neighbors 9
+dump edges_of 3 5
+dump edges_of 5 3
+dump edges_of 3
+dump degrees
+dump bfs 5
+dump bfs 5 1
+dump bfs 5 2
+dump components
+dump mod_bfs 5
+dump mod_bfs 5 1
+dump mod_bfs 5 2
+dump mod_bfs 5 3
+dump spl 5 9
+dump spl 5 7
+# re-adding an existing node must not move it in the order
+add_node 3
+dump nodes
+# re-adding an existing edge must not move it in either adjacency
+add_edge 5 3
+dump neighbors 5
+# a new edge appends to both endpoints
+add_edge 5 9
+dump neighbors 5
+dump neighbors 9
+dump edges
+# removal must not disturb the order of what remains
+remove_edge 5 1
+dump neighbors 5
+dump edges
+remove_node 3
+dump nodes
+dump edges
+dump neighbors 5
+dump components

@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch supersedes the previous run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The user-facing requirement: the project must compile on Linux, macOS and Windows.
+  #
+  # `build.rs` compiles the vendored C++ in `vendor/edlib/edlib.cpp` through the `cc`
+  # crate. No extra setup is needed for that on any runner: ubuntu-latest has gcc/g++,
+  # macos-latest has the Xcode command line tools (clang++), and windows-latest ships
+  # the MSVC build tools, which `cc` locates itself for the default
+  # x86_64-pc-windows-msvc target. `-std=c++11` is passed via `flag_if_supported`, so
+  # MSVC simply ignores it.
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            run_tests: true
+          - os: macos-latest
+            run_tests: true
+          # Windows is COMPILE-ONLY on purpose -- see the `cargo test` step below.
+          - os: windows-latest
+            run_tests: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target dir
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # Compiles the library, the binary, the examples and the test harnesses --
+      # without running any of them. This is the whole job on Windows.
+      # `--all-features` turns on `cli`, so the binary target and clap are compiled too.
+      # Without it the default feature set is empty and `src/main.rs` is never built --
+      # which would leave the CLI's cross-platform portability completely unchecked.
+      - name: cargo check --all-targets --all-features
+        run: cargo check --all-targets --all-features
+
+      # Tests are NOT run on Windows.
+      #
+      # `src/support/proc.rs` reproduces Python's `subprocess.run(..., shell=True)` by
+      # spawning `Command::new("/bin/sh").arg("-c")`. That path does not exist on
+      # Windows, so its unit tests -- `run_shell_reports_exit_status`,
+      # `check_panics_like_called_process_error` and
+      # `capture_repr_has_the_shape_the_version_probes_regex_over` -- cannot pass there.
+      # The step above still *compiles* the tests on Windows, which is what the
+      # portability requirement actually asks for; only execution is skipped.
+      - name: cargo test
+        if: matrix.run_tests
+        run: cargo test --all-features
+
+  # Style and lint gates run once, on Linux only -- they are platform-independent.
+  lint:
+    name: lint (clippy + rustfmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable) with clippy and rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+  # The MSRV in Cargo.toml was derived analytically from the dependency graph via
+  # `cargo metadata` and has never actually been compiled against. This job is the
+  # first real test of it. The version is read out of the manifest at run time rather
+  # than duplicated here, so bumping `rust-version` bumps what CI tests.
+  msrv:
+    name: MSRV (rust-version from Cargo.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          version="$(grep -m1 -E '^[[:space:]]*rust-version[[:space:]]*=' Cargo.toml \
+            | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ -z "$version" ]; then
+            echo "::error file=Cargo.toml::no rust-version key found in [package]"
+            exit 1
+          fi
+          echo "Declared MSRV: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ steps.msrv.outputs.version }}
+
+      # `--all-features` turns on `cli`, so the binary target and clap are compiled too.
+      # Without it the default feature set is empty and `src/main.rs` is never built --
+      # which would leave the CLI's cross-platform portability completely unchecked.
+      - name: cargo check --all-targets --all-features
+        run: cargo check --all-targets --all-features

@@ -1,0 +1,17 @@
+# Patches applied to the pinned upstream checkout to build the parity reference.
+#
+# One patch name per line. Blank lines and '#' comments ignored. Applied top to bottom.
+#
+# GOAL (set by the user): panaroo-rs targets parity with the CANONICALISED and BUG-FIXED
+# reference, not with stock upstream. Both tiers below are therefore ON.
+# See PORTING_PLAN.md 6.1.
+
+# --- Tier D: determinism ---------------------------------------------------------------
+# Replaces arbitrary `set` iteration with sorted order at the 16 sites where it is
+# observable. Without this the reference is not reproducible run-to-run.
+d01-determinism.patch
+
+# --- Tier B: bug fixes -----------------------------------------------------------------
+# Each makes panaroo-rs disagree with published stock-Panaroo results. That is the
+# intended goal here. See ORIGINAL_CODE_BUG.md.
+b01-merged-nodes-mem.patch

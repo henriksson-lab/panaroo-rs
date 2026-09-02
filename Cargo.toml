@@ -1,0 +1,105 @@
+[package]
+name = "panaroo-rs"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+authors = ["Johan Henriksson <he.johan@gmail.com>"]
+description = """
+A faithful Rust translation of Panaroo, the prokaryotic pangenome pipeline. \
+Byte-identical output to the Python reference; a port, not new science.\
+"""
+readme = "README.md"
+
+# SPDX expression. MIT is not a free choice here: panaroo-rs is a derivative work of
+# Panaroo (MIT, Copyright (c) 2019 Gerry Tonkin-Hill), so it must carry a compatible
+# licence and preserve upstream's notice. That notice is retained verbatim in LICENSE,
+# and the wider third-party picture -- reimplemented libraries, the vendored edlib, and
+# the GPL aligners invoked as subprocesses -- is in NOTICE.md.
+license = "MIT"
+
+repository = "https://github.com/henriksson-lab/panaroo-rs"
+homepage = "https://github.com/henriksson-lab/panaroo-rs"
+documentation = "https://docs.rs/panaroo-rs"
+
+keywords = ["bioinformatics", "pangenome", "genomics", "panaroo"]
+categories = ["science", "command-line-utilities"]
+
+# Floor imposed by the dependency graph, not by this crate's own code: clap 4.6,
+# indexmap 2.14 and hashbrown 0.17 all declare rust-version 1.85. Nothing written here
+# needs newer than 1.65 (`let ... else`). Derived from the resolved manifests via
+# `cargo metadata`; NOT exercised in CI against 1.85 itself.
+rust-version = "1.85"
+
+# What ships in the published crate. `vendor/edlib/` is REQUIRED -- build.rs compiles it,
+# so omitting it makes the crate unbuildable. Deliberately excluded: the upstream Panaroo
+# checkout (a separate MIT project we neither own nor should redistribute), the parity
+# harness's generated data and outputs, and build artefacts.
+#
+# Every pattern is ROOT-ANCHORED with a leading `/`. These are gitignore-style globs, so a
+# bare `README.md` would also match `panaroo/README.md` and
+# `tests/parity/build/reference/README.md` -- which silently packaged upstream Panaroo's
+# own README and LICENSE into this crate on the first attempt. Keep the leading slashes.
+include = [
+    "/src/**/*.rs",
+    "/examples/*.rs",
+    "/build.rs",
+    "/vendor/edlib/edlib.h",
+    "/vendor/edlib/edlib.cpp",
+    "/vendor/edlib/LICENSE",
+    "/vendor/edlib/README.md",
+    "/LICENSE",
+    "/NOTICE.md",
+    "/README.md",
+    "/PORTING_PLAN.md",
+    "/ORIGINAL_CODE_BUG.md",
+]
+
+[lib]
+name = "panaroo"
+path = "src/lib.rs"
+
+# Named `panaroo` to match upstream's CLI, so this is a drop-in replacement.
+#
+# NOTE: `cargo install panaroo-rs --features cli` therefore places a `panaroo` binary in
+# ~/.cargo/bin, which may shadow a Python Panaroo already on PATH. Intentional for a
+# drop-in replacement, but a real footgun -- see PORTING_PLAN.md §11 item F.
+#
+# `required-features` means the binary is simply not built unless `cli` is on, so a
+# library consumer never compiles `main.rs` or pulls in clap.
+[[bin]]
+name = "panaroo"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+# Default OFF. The crate's primary product is the LIBRARY: the translated pipeline
+# functions, which a caller drives directly with an `Args` value they construct
+# themselves. The command-line front end is a thin `main.rs` over that library, and its
+# only dependency -- clap -- is a large tree that a library consumer should not have to
+# build. Anyone who wants the executable asks for it explicitly:
+#
+#     cargo install panaroo-rs --features cli
+#     cargo build --release --features cli
+#
+# Turning this on changes nothing about the library's behaviour or output; it only adds
+# the binary target.
+default = []
+cli = ["dep:clap"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"], optional = true }
+indexmap = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+lto = "thin"
+
+[package.metadata.docs.rs]
+# Build docs with `cli` on so the feature is not invisible on docs.rs.
+all-features = true

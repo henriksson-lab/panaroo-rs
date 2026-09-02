@@ -1,0 +1,66 @@
+Tier B (bug fix) — find_missing.py:61: use the current row's genome, not a leaked loop variable
+
+`mem` is computed from `sid`, which is not defined in this loop. It leaks from the loop
+that ends at line 53 (`for sid in sorted(G.nodes[node]['seqIDs'])`), so after that loop it
+holds the lexicographically last seqID of the last node satisfying the merged test. `mem`
+is therefore one arbitrary, constant genome index for every row of gene_data.csv.
+
+Effect: every merged-node DNA sequence piles into a single `merged_nodes[mem]` bucket, and
+every other genome receives an empty dict from the defaultdict. `search_gff` consumes this
+as `merged_nodes[member]`, one genome at a time, and uses it to decide whether to recover
+the *full extent* of a merged gene by alignment (lines 269-283) instead of trusting the
+short annotated fragment bounds. So for all genomes but one, that recovery silently never
+runs: less seq_coverage is marked, fewer overlaps are detected, and members that Panaroo
+intended to drop via remove_member_from_node survive into gene_presence_absence.csv.
+
+Read as unintentional because the data structure contradicts the assignment: merged_nodes
+is a `defaultdict(dict)` keyed by member and consumed per genome, a shape that is pointless
+unless `mem` varied. Every other read in the block uses `line[2]`, and `line[2]` is exactly
+the clustering ID whose first field is the genome index — the same idiom used at line 77
+(`member = int(sid.split("_")[0])`).
+
+MEASURED EFFECT (strict mode, PYTHONHASHSEED=0, upstream e96b497). Stock -> patched:
+
+                        smoke (4 x 3 contigs)   ci (4 full M. tuberculosis genomes)
+  total gene clusters   3732 -> 3731            5118 -> 5116
+  core genes             746 -> 746             5097 -> 5096
+  shell genes           2986 -> 2985              21 -> 20
+  presence calls        9838 -> 9837           20431 -> 20428
+  refound genes           18 -> 18                56 -> 56
+  wall clock           53.9s -> 53.1s          65.3s -> 66.0s
+
+  pre_filt_graph.gml is byte-identical on both, as expected: find_missing runs after it is
+  written. gene_presence_absence.Rtab differs on both, so this is a structural change to the
+  pangenome, not a rendering one. On `ci`, gene_data.csv and combined_*_CDS.fasta also
+  differ -- find_missing appends refound records to them.
+
+Direction matches the analysis: with the fix, more seq_coverage is marked, more overlaps are
+detected, and a node that loses its last member is deleted. The effect is small but real:
+1-2 clusters out of 3700-5100.
+
+I predicted this would be materially slower, because the fix un-masks the merged-extent
+search that is currently skipped for all but one genome. That did not happen at either
+scale (<1% either way). The prediction was wrong; do not budget for it, but re-measure at
+higher genome counts before assuming it stays free.
+
+Status: OFF by default. See PORTING_PLAN.md 6.1 Tier B.
+
+diff --git a/panaroo/find_missing.py b/panaroo/find_missing.py
+index f9ac6ae..3279353 100755
+--- a/panaroo/find_missing.py
++++ b/panaroo/find_missing.py
+@@ -55,13 +55,13 @@ def find_missing(G,
+     merged_nodes = defaultdict(dict)
+     with open(gene_data_file, 'r') as infile:
+         next(infile)
+         for line in infile:
+             line = line.split(",")
+             if line[2] in merged_ids:
+-                mem = int(sid.split("_")[0])
++                mem = int(line[2].split("_")[0])
+                 if merged_ids[line[2]] in merged_nodes[mem]:
+                     merged_nodes[mem][merged_ids[line[2]]] = G.nodes[
+                         merged_ids[line[2]]]["dna"][G.nodes[merged_ids[
+                             line[2]]]['maxLenId']]
+                 else:
+                     merged_nodes[mem][merged_ids[line[2]]] = line[5]

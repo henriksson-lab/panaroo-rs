@@ -1,0 +1,35 @@
+# Pinned environment for running the Panaroo parity reference.
+#
+# External tool versions are part of the parity contract: cd-hit's clustering and mafft's
+# alignments depend on their exact version, so a change here invalidates golden outputs.
+# Record any change in PORTING_PLAN.md and regenerate the goldens.
+#
+# `biocode` IS required even though panaroo/biocode_convert.py looks vendored: it does
+# `from biocode import annotation, things, utils` at line 21, and prokka.py imports it at
+# module scope, so `python -m panaroo` fails at import time without it. It is pip-only and
+# drags in matplotlib + igraph + taxadb.
+#
+# Plotting deps beyond that (plotly, dendropy, scikit-learn) are only reachable from the
+# auxiliary entry points, which are out of scope.
+name: panaroo-parity
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  # external tools (wrapped, not translated)
+  - cd-hit=4.8.1
+  - mafft=7.526
+  # python deps on the `panaroo` entry-point path
+  - biopython=1.84
+  - networkx=3.3
+  - gffutils=0.13
+  - joblib=1.4.2
+  - tqdm=4.66.5
+  - scipy=1.14.1
+  - numpy=1.26.4
+  - python-edlib=1.3.9
+  - pip
+  - pip:
+      - intbitset==3.1.0
+      - biocode==0.12.1
