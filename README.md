@@ -3,7 +3,11 @@
 A faithful *mostly*-Rust translation of [Panaroo](https://github.com/gtonkinhill/panaroo), the
 prokaryotic pangenome pipeline.
 
-Note that this crate is not fully Rust yet. Translation of upstream dependencies is needed first. The aim of this translation is to improve speed over the original panaroo code
+Note that this crate is not fully Rust yet. Translation of upstream dependencies is needed first. The aim of this translation is to improve speed over the original Panaroo code
+
+Also note that the Panaroo code output is not reproduced due to translation challenges and a suspected upstream bug
+
+**not yet tested enough**
 
 * 2026-09-02: Initial translation
 

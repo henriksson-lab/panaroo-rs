@@ -2,7 +2,7 @@
 
 Compares `panaroo-rs` against the **patched Python reference** (the same tree
 `tests/parity/reference/apply.sh` builds, Tier D + Tier B applied) on **wall-clock time**
-and **peak memory**, at 1 and 10 threads.
+and **peak memory**, at whatever thread counts you ask for (`-T`).
 
 This is a benchmark, not a parity test — but it refuses to report a number without first
 checking the two sides produced the same output, because a speed number for a run that
@@ -24,12 +24,18 @@ tests/parity/reference/apply.sh     # the patched Python reference
 
 ```sh
 conda activate panaroo-parity
-tests/bench/run.sh                       # dataset ci, 3 repeats, -t 1 and -t 10
-tests/bench/run.sh ci -n 5 -T 1,4,10     # 5 repeats, three thread counts
+tests/bench/run.sh ci -n 1 -T 20         # what the committed results.md was produced with
+tests/bench/run.sh ci -n 5 -T 1,20       # 5 repeats, two thread counts, with real spread
 tests/bench/run.sh smoke -n 1            # fast sanity run
 tests/bench/run.sh ci -n 3 -- -a core    # with the core-alignment stage (invokes mafft)
 tests/bench/run.sh ci -P                 # python only (Rust side unavailable/mid-refactor)
 ```
+
+**Choosing `-t`.** Pick it against the *physical* core count, not `nproc`. The reference
+host is one socket, 20 physical cores, hyperthreaded to 40 logical CPUs, so `-t 20` is one
+thread per physical core — full machine, no two threads sharing a core. The harness records
+both counts in `env.txt` and `results.md` precisely so a reader does not mistake `-t 20`
+for "half the machine".
 
 Options: `-n` repeats, `-T` comma-separated thread counts, `-m` clean-mode, `-r`
 reference tree, `-o` results dir, `-k` keep per-run output dirs, `-V` skip the
@@ -49,10 +55,15 @@ the most recent), which is gitignored scratch:
 | `logs/*.sample.json` | process-tree memory sampler output per run |
 | `logs/*.log` | stdout+stderr of each run |
 | `logs/verify-t<N>.txt` | `tests/parity/canonicalise.py` comparison of the two sides |
+| `results.md` | README-ready markdown table with python/rust ratios (also copied to `tests/bench/results.md`) |
 
 `results.tsv` columns: `run_id dataset n_genomes impl threads rep phase exit_status
-wall_s time_maxrss_kb tree_peak_rss_kb tree_peak_pss_kb tree_peak_nproc clean_mode
-extra_args log cmdline`.
+wall_s user_s sys_s cpu_s time_maxrss_kb tree_peak_rss_kb tree_peak_pss_kb
+tree_peak_nproc clean_mode extra_args log cmdline`.
+
+`wall_s` is elapsed time; `cpu_s` is `user_s + sys_s`, i.e. CPU time summed over every
+thread and child process. At `-t N` the wall-time ratio conflates single-core efficiency
+with how well each side keeps N cores busy; the CPU-time ratio separates them.
 
 Re-render the summary from a saved TSV at any time:
 
@@ -85,15 +96,20 @@ tests/bench/summarise.py tests/bench/build/latest/results.tsv
   neither side is charged for cold page cache or a cold import cache.
 - **Drift.** The timed repeats are interleaved (`py, rust, py, rust, …`), not batched per
   side, so machine drift hits both equally.
-- **Spread.** Every metric is min / median / max across repeats, never just a mean.
+- **Spread.** Every metric is min / median / max across repeats, never just a mean. With
+  `-n 1` there is no spread, and `results.md` says so at the top rather than printing a
+  fake range: single-run ratios are quoted to two significant figures and labelled
+  approximate.
 - **Python startup.** `python -c "import panaroo"` is timed separately (best of 3) and
   reported. It stays *inside* the measured runs — it is a real cost of the Python
   implementation — but it is broken out so the reader can see how much of the gap at
   small inputs is fixed overhead rather than compute.
-- **Machine state.** `env.txt` and the summary record CPU model, logical core count, and
-  the load average. **Nothing enforces that the box is idle** — check the load line: if
-  the 1-minute load meaningfully exceeds the thread count you asked for, something else
-  was running and the numbers are not trustworthy.
+- **Machine state.** `env.txt` and the summary record CPU model, physical and logical
+  core counts, and the load average at start. **Nothing here can make the box idle** — the
+  harness only detects and shouts: if the 1-minute load exceeds a quarter of the logical
+  CPUs it prints a `MACHINE WAS NOT IDLE` warning, repeats it in the summary, and puts a
+  warning block at the bottom of `results.md`. Numbers taken under load are not
+  trustworthy, especially the multi-thread ones.
 
 Each run gets a fresh, empty output directory (`build/run-*/out/<impl>-t<N>-r<rep>`),
 because Panaroo writes into its output dir and would otherwise collide across runs. They
@@ -104,7 +120,7 @@ are deleted after measuring unless `-k` is given.
 **`time -v maxRSS` is not the memory the run used.** GNU `/usr/bin/time` reports
 `getrusage(RUSAGE_CHILDREN)`'s "Maximum resident set size", which is the peak of the
 **single largest process** in the tree. It is never a sum. Both sides spawn cd-hit; the
-Python side additionally forks a `multiprocessing` pool. So at `-t 10` this column can
+Python side additionally forks a `multiprocessing` pool. So at high `-t` this column can
 badly understate what the machine actually had to hold. It is kept as the baseline column
 because it is exact and trivially reproducible by anyone with GNU time.
 
@@ -122,6 +138,20 @@ Both sampled columns are **lower bounds**: a spike shorter than the 100 ms sampl
 interval is missed. `procs` is the largest number of live processes seen in one sample.
 
 One asymmetry is real rather than an artefact: Rust parallelises with threads inside one
-process, Python with forked processes. At `-t 10` the Rust `maxRSS` is essentially the
+process, Python with forked processes. At high `-t` the Rust `maxRSS` is essentially the
 whole run's footprint, while the Python `maxRSS` is one worker's share. Compare the
 **PSS** column across implementations; compare `maxRSS` only within one implementation.
+
+## `results.md`
+
+Every run writes a README-ready markdown table to `tests/bench/results.md` (and a copy in
+the run directory). It carries the machine description, the flags, the output-equivalence
+result, the python/rust ratios computed from the medians, and the max-RSS footnote — the
+footnote travels with the table so the numbers cannot be lifted into another document
+without it. Regenerate it from any saved TSV:
+
+```sh
+tests/bench/summarise.py RUN/results.tsv --env RUN/env.txt --markdown tests/bench/results.md
+```
+
+Do not hand-edit `results.md`; it is overwritten by the next run.
