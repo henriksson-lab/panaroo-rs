@@ -15,7 +15,7 @@ trap 'rm -rf "$tmp"' EXIT
 command -v python3 >/dev/null && python3 -c "import gffutils" 2>/dev/null \
   || { echo "gffutils not importable -- conda activate panaroo-parity" >&2; exit 1; }
 
-cargo build --release --example dump_gff --manifest-path "$repo/Cargo.toml" >/dev/null 2>&1
+cargo build --release --example dump_gff --manifest-path "$repo/Cargo.toml" >/dev/null
 dumper="$repo/target/release/examples/dump_gff"
 
 files=("$@")

@@ -7,6 +7,8 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
+# shellcheck source=tests/lib/safe_rm.sh
+source "$repo/tests/lib/safe_rm.sh"
 build="$repo/tests/parity/build"
 dataset="${1:-ci}"; shift || true
 [[ "${1:-}" == "--" ]] && shift
@@ -18,8 +20,8 @@ input="$build/data/$dataset/input.txt"
 command -v cd-hit >/dev/null || { echo "cd-hit not on PATH -- conda activate panaroo-parity" >&2; exit 1; }
 
 out="$build/out/e2e/$dataset"
-rm -rf "$out"; mkdir -p "$out/py" "$out/rs"
-cargo build --release --features cli --manifest-path "$repo/Cargo.toml" >/dev/null 2>&1
+safe_rm_rf "$repo/tests" "$out"; mkdir -p "$out/py" "$out/rs"
+cargo build --release --features cli --manifest-path "$repo/Cargo.toml" >/dev/null
 
 echo "== reference =="
 ( cd "$build/reference" && PYTHONHASHSEED=0 python -m panaroo \

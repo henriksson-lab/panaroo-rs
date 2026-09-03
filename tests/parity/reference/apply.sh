@@ -12,6 +12,8 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
+# shellcheck source=tests/lib/safe_rm.sh
+source "$repo/tests/lib/safe_rm.sh"
 upstream="$repo/panaroo"
 outdir="$repo/tests/parity/build/reference"
 enabled="$here/enabled.txt"
@@ -35,7 +37,7 @@ if ! git -C "$upstream" diff --quiet || ! git -C "$upstream" diff --cached --qui
 fi
 rev="$(git -C "$upstream" rev-parse HEAD)"
 
-rm -rf "$outdir"
+safe_rm_rf "$repo/tests" "$outdir"
 mkdir -p "$(dirname "$outdir")"
 git -C "$upstream" archive --format=tar HEAD | (mkdir -p "$outdir" && tar -x -C "$outdir")
 

@@ -363,13 +363,18 @@ fn split_semi(v: &str) -> Vec<String> {
 ///
 /// Reconnects each member's neighbours pairwise before removing the node.
 pub fn delete_node(g: &mut Graph, node: usize) {
+    // `edges_of([node])` is invariant across the member loop: every edge the loop adds has
+    // BOTH endpoints already in `adj[node]`, and `PyDict::insert` keeps an existing key's
+    // position -- so `adj[node]`'s key order, which is all `edges_of` reads, cannot change.
+    // Hoisted; the per-member `contains(mem)` filter stays inside.
+    let node_edges: Vec<(usize, usize)> = g.edges_of(&[node]);
     // add in new edges
     for mem in g.node(node).members.iter().collect::<Vec<_>>() {
         // Tier D: `sorted(set(...))`, not `list(set(...))`. The order decides adjacency
         // insertion order, which decides BFS order in collapse_families.
-        let mut mem_edges: Vec<usize> = g
-            .edges_of(&[node])
-            .into_iter()
+        let mut mem_edges: Vec<usize> = node_edges
+            .iter()
+            .copied()
             .filter(|&e| g.edge(e.0, e.1).members.contains(mem))
             .map(|e| e.1)
             .collect::<std::collections::BTreeSet<_>>()

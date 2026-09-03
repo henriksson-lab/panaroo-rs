@@ -288,13 +288,14 @@ pub fn get_gene_sequences(
             continue;
         }
 
-        let mut gene_sequence: Option<String> = None;
+        let mut gene_sequence_found = false;
         // PORTING_PLAN.md §9 item 3: linear scan of every contig, with no `break` after a
         // match. Preserved -- the missing `break` is what makes the `gene_sequence is None`
-        // check below reachable at all.
+        // check below reachable at all. The scan itself is cheap (a few short string
+        // compares per contig); only clone the contig id once the ids actually match.
         for sequence_index in 0..sequences.len() {
-            let scaffold_id = sequences[sequence_index].id.clone();
-            if scaffold_id == entry.seqid {
+            if sequences[sequence_index].id == entry.seqid {
+                let scaffold_id = sequences[sequence_index].id.clone();
                 let full = &sequences[sequence_index].seq;
                 let lo = (entry.start - 1).max(0) as usize;
                 let hi = (entry.stop as usize).min(full.len());
@@ -306,7 +307,7 @@ pub fn get_gene_sequences(
                 if entry.strand == "-" {
                     seq = crate::support::seq::reverse_complement(&seq);
                 }
-                gene_sequence = Some(seq.clone());
+                gene_sequence_found = true;
 
                 let mut gene_name = attr_first_or_empty(entry, "gene");
                 if gene_name.is_empty() {
@@ -328,12 +329,18 @@ pub fn get_gene_sequences(
                     }
                 }
 
-                let bad = (seq.len() % 3 > 0)
-                    || (seq.len() < 34)
-                    || translate(&pad3(&seq), table)
-                        .get(..translate(&pad3(&seq), table).len().saturating_sub(1))
+                // The Python's `or` short-circuits, so the stop-codon test is only reached
+                // when `len(gene_sequence) % 3 == 0` -- which is exactly the condition under
+                // which `pad3` was a no-op. Kept lazy for the same reason: `translate`
+                // asserts `len % 3 == 0`, and the first operand is what guarantees it.
+                let mut bad = (seq.len() % 3 > 0) || (seq.len() < 34);
+                if !bad {
+                    let prot = translate(&seq, table);
+                    bad = prot
+                        .get(..prot.len().saturating_sub(1))
                         .unwrap_or("")
                         .contains('*');
+                }
                 if bad {
                     println!("invalid gene! file - id:  {gff_file_name}  -  {}", entry.id);
                     println!("Length: {} , Has stop: ...", seq.len());
@@ -362,7 +369,7 @@ pub fn get_gene_sequences(
                     .push((entry.start, rec));
             }
         }
-        if gene_sequence.is_none() {
+        if !gene_sequence_found {
             println!("Sequence ID not found in Fasta! {}", entry.seqid);
             if filter_seqs {
                 continue;
@@ -388,7 +395,11 @@ pub fn get_gene_sequences(
     // See PORTING_PLAN.md §6.6.
     let scaffolds: Vec<String> = scaffold_genes.keys().cloned().collect();
     for (scaff_count, scaffold) in scaffolds.iter().enumerate() {
-        let genes = scaffold_genes.get(scaffold).unwrap().clone();
+        // `scaffold_genes` is dead after this loop and each key is visited exactly once
+        // (the keys came from `PyDict::keys()`), so take the vector rather than deep-cloning
+        // every SeqRecord in it. `mem::take` leaves an empty Vec behind, so no key is
+        // removed and IndexMap order is untouched.
+        let genes = std::mem::take(scaffold_genes.get_mut(scaffold).unwrap());
         for (gene_index, (_, rec)) in genes.into_iter().enumerate() {
             let clustering_id = format!("{file_number}_{scaff_count}_{gene_index}");
             sequence_dictionary.insert(clustering_id, rec);
@@ -397,21 +408,6 @@ pub fn get_gene_sequences(
 
     let proteins = translate_sequences(&sequence_dictionary, table);
     (sequence_dictionary, proteins)
-}
-
-/// Pad a sequence to a multiple of three so [`translate`] can be called on it.
-///
-/// Not a Python function. The Python calls `translate(str(gene_sequence), table)` *before*
-/// testing `len % 3`, and numpy raises on a ragged fancy-index when the length is not a
-/// multiple of 3 — but Python's `or` short-circuits: `len(seq) % 3 > 0` is evaluated first,
-/// so `translate` is only reached when the length is already valid. Padding keeps the Rust
-/// total without changing which sequences are rejected.
-fn pad3(s: &str) -> String {
-    let mut out = s.to_string();
-    while out.len() % 3 != 0 {
-        out.push('N');
-    }
-    out
 }
 
 /// `prokka.py::translate_sequences`
@@ -484,17 +480,21 @@ pub fn output_files<P: Write, D: Write, C: Write>(
         let relevant_seqrecord = dna_dictionary
             .get(clustering_id)
             .unwrap_or_else(|| panic!("KeyError: {clustering_id}"));
-        let out_list = [
-            gff_name.as_str(),
+        // `",".join(out_list)` -- written field by field so no ~1.4 KB temporary is built
+        // per row. Same bytes, same order.
+        writeln!(
+            csv_handle,
+            "{},{},{},{},{},{},{},{}",
+            gff_name,
             relevant_seqrecord.scaffold(),
-            clustering_id.as_str(),
-            relevant_seqrecord.id.as_str(),
-            protien.seq.as_str(),
-            relevant_seqrecord.seq.as_str(),
-            relevant_seqrecord.name.as_str(),
-            relevant_seqrecord.description.as_str(),
-        ];
-        writeln!(csv_handle, "{}", out_list.join(",")).expect("write gene_data.csv");
+            clustering_id,
+            relevant_seqrecord.id,
+            protien.seq,
+            relevant_seqrecord.seq,
+            relevant_seqrecord.name,
+            relevant_seqrecord.description,
+        )
+        .expect("write gene_data.csv");
     }
 }
 
@@ -518,6 +518,13 @@ fn file_stem(p: &str) -> String {
 /// PORTING_PLAN.md §9 item 9: the Python chunks the file list into batches of `n_cpu` and
 /// spawns a fresh joblib pool per batch. Results are consumed in batch order, so a single
 /// pool produces identical output.
+///
+/// The batching is not *only* a pool-lifetime detail, though: it also caps how many results
+/// are alive at once. Each result here is one genome's `SeqRecord`s (~9-10 MB), so collecting
+/// all `N` before writing any -- which is what an earlier version of this function did --
+/// holds ~5 GB at `N = 500` where CPython holds ~`n_cpu` genomes' worth. See
+/// [`crate::support::parallel::parallel_map_ordered_consume`], which keeps the single pool
+/// while restoring CPython's memory bound and its in-order consumption.
 pub fn process_prokka_input(
     gff_list: &[String],
     output_dir: &str,
@@ -530,15 +537,22 @@ pub fn process_prokka_input(
 
     let trans_table = get_trans_table(table);
 
-    let mut prot_handle = BufWriter::new(
+    // 1 MiB rather than BufWriter's 8 KiB default: phase 1 writes ~55 MB across these three
+    // handles on the `ci` dataset, which is ~6700 write(2) calls at the default capacity.
+    // Buffer capacity cannot change the byte stream or its order.
+    const WRITE_BUF: usize = 1 << 20;
+    let mut prot_handle = BufWriter::with_capacity(
+        WRITE_BUF,
         std::fs::File::create(format!("{output_dir}combined_protein_CDS.fasta"))
             .expect("create combined_protein_CDS.fasta"),
     );
-    let mut dna_handle = BufWriter::new(
+    let mut dna_handle = BufWriter::with_capacity(
+        WRITE_BUF,
         std::fs::File::create(format!("{output_dir}combined_DNA_CDS.fasta"))
             .expect("create combined_DNA_CDS.fasta"),
     );
-    let mut csv_handle = BufWriter::new(
+    let mut csv_handle = BufWriter::with_capacity(
+        WRITE_BUF,
         std::fs::File::create(format!("{output_dir}gene_data.csv")).expect("create gene_data.csv"),
     );
     writeln!(
@@ -548,24 +562,27 @@ pub fn process_prokka_input(
     .expect("write header");
 
     // PORTING_PLAN.md §9 item 9: the Python chunks into batches of n_cpu and spawns a fresh
-    // joblib pool per batch, then consumes each batch's results in order. Results are
-    // consumed in input order either way, so one pool is observationally identical -- see
-    // support::parallel.
+    // joblib pool per batch, then consumes each batch's results in order. One pool is
+    // observationally identical because results are consumed in input order either way --
+    // but the batching also bounds live results to n_cpu, which `parallel_map` would not.
+    // `parallel_map_ordered_consume` keeps both properties: same sink order, same memory
+    // bound, no per-batch barrier. See support::parallel.
     let jobs: Vec<(usize, String)> = gff_list.iter().cloned().enumerate().collect();
-    let results = crate::support::parallel::parallel_map(n_cpu, jobs, |(gff_no, gff)| {
-        get_gene_sequences(&gff, gff_no, filter_seqs, &trans_table)
-    });
-
-    for (i, (dna, prot)) in results.into_iter().enumerate() {
-        output_files(
-            &dna,
-            &prot,
-            &mut prot_handle,
-            &mut dna_handle,
-            &mut csv_handle,
-            &gff_list[i],
-        );
-    }
+    crate::support::parallel::parallel_map_ordered_consume(
+        n_cpu,
+        jobs,
+        |(gff_no, gff)| get_gene_sequences(&gff, gff_no, filter_seqs, &trans_table),
+        |i, (dna, prot)| {
+            output_files(
+                &dna,
+                &prot,
+                &mut prot_handle,
+                &mut dna_handle,
+                &mut csv_handle,
+                &gff_list[i],
+            );
+        },
+    );
     true
 }
 

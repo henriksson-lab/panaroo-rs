@@ -87,9 +87,42 @@ required-features = ["cli"]
 default = []
 cli = ["dep:clap"]
 
+# Call cd-hit in-process, via the `cdhit-rs` translation, instead of spawning the C++
+# binary. OFF by default: the embedded path is verified on the parity suite but is not
+# what upstream Panaroo does, and it pulls a GPL-2.0 dependency into the build.
+cdhit-embedded = ["dep:cdhit-rs"]
+
+# Run MAFFT in-process, via the `rust-MAFFT` translation, instead of spawning the mafft
+# shell wrapper. OFF by default.
+mafft-embedded = ["dep:mafft-rs"]
+
+
+# Diagnostic probe, not part of the pipeline: measures whether the embedded MAFFT path
+# actually parallelises. Needs the feature, so it must not be built by a default
+# `cargo package` verify or by CI's --all-targets without --all-features.
+[[example]]
+name = "mafft_scaling"
+required-features = ["mafft-embedded"]
+
 [dependencies]
 anyhow = "1"
+# `version` is required by `cargo package`, which strips the `git` spec on publish and
+# resolves from crates.io. Neither embedded crate is on crates.io, so a crates.io user
+# cannot enable these features -- they are for source builds. Both features are off by
+# default, so the published crate itself is unaffected.
+#
+# Gated behind `cdhit-embedded` so the default build never sees it. NOTE it is
+# GPL-2.0-or-later, unlike this crate.
+cdhit-rs = { git = "https://github.com/henriksson-lab/cdhit-rs", version = "0.1", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
+# The `mafft-bin` crate of the fork, whose package name is `mafft-rs`. It carries the
+# CLI's flag->behaviour layer (`--auto` mode selection, `--adjustdirection` strand
+# detection), which is the part that must not be re-derived by a caller.
+#
+# TODO: pin `rev = "2dfd1896c056899fb67e7b3c6f3ae84b7229f55d"` once that commit is
+# pushed -- it is where `run_from_with_progress` / `SilentProgress` first appear. A rev
+# cannot be pinned before it exists on the remote: cargo must fetch it to resolve.
+mafft-rs = { git = "https://github.com/mahogny/rust-MAFFT", version = "0.1", optional = true }
 indexmap = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -103,3 +136,10 @@ lto = "thin"
 [package.metadata.docs.rs]
 # Build docs with `cli` on so the feature is not invisible on docs.rs.
 all-features = true
+
+# TEMPORARY -- remove once commit 2dfd189 is on the remote. Overrides the git source with
+# the local fork checkout so the `mafft-embedded` feature builds against the unpushed
+# progress-sink API. Must be the LAST table in this file: everything below a `[patch]`
+# header is parsed as part of it.
+[patch."https://github.com/mahogny/rust-MAFFT"]
+mafft-rs = { path = "/home/mahogny/github/claude/rust-MAFFT/crates/mafft-bin" }

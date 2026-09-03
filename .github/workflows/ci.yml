@@ -34,9 +34,8 @@ jobs:
             run_tests: true
           - os: macos-latest
             run_tests: true
-          # Windows is COMPILE-ONLY on purpose -- see the `cargo test` step below.
           - os: windows-latest
-            run_tests: false
+            run_tests: true
     steps:
       - uses: actions/checkout@v4
 
@@ -56,15 +55,18 @@ jobs:
       - name: cargo check --all-targets --all-features
         run: cargo check --all-targets --all-features
 
-      # Tests are NOT run on Windows.
+      # Tests now run on all three platforms.
       #
-      # `src/support/proc.rs` reproduces Python's `subprocess.run(..., shell=True)` by
-      # spawning `Command::new("/bin/sh").arg("-c")`. That path does not exist on
-      # Windows, so its unit tests -- `run_shell_reports_exit_status`,
-      # `check_panics_like_called_process_error` and
-      # `capture_repr_has_the_shape_the_version_probes_regex_over` -- cannot pass there.
-      # The step above still *compiles* the tests on Windows, which is what the
-      # portability requirement actually asks for; only execution is skipped.
+      # They previously could not on Windows: `support/proc.rs` reproduced Python's
+      # `subprocess.run(..., shell=True)` by spawning `/bin/sh -c`, which does not exist
+      # there. It now goes through `proc::shell`, which picks `/bin/sh -c` on Unix and
+      # `cmd /C` on Windows -- both of which are what CPython's `shell=True` actually
+      # spawns on those platforms -- and the two tests that assumed a Unix shell (`true`
+      # is not a `cmd` builtin; `cmd`'s echo emits CRLF) were made portable.
+      #
+      # NOTE: the parity and benchmark suites under `tests/` are still Unix-only and are
+      # NOT run here by any platform -- they need conda, cd-hit and mafft. This job covers
+      # the library's own unit tests.
       - name: cargo test
         if: matrix.run_tests
         run: cargo test --all-features

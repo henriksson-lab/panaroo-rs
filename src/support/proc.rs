@@ -16,16 +16,49 @@
 //!
 //! `shell=True` means `/bin/sh -c <string>`, which is what the redirections Panaroo appends
 //! (`> /dev/null`, `> out.aln`) rely on.
-
+//!
+//! # Portability
+//!
+//! Every call goes through [`shell`], which picks the platform's shell rather than
+//! hardcoding `/bin/sh`. On Unix that is `/bin/sh -c`, byte-for-byte what CPython's
+//! `shell=True` does, so behaviour there is unchanged. On Windows it is `cmd /C`, which is
+//! also what CPython's `shell=True` does.
+//!
+//! One thing does NOT translate by itself: the call sites append the literal `> /dev/null`
+//! (`cdhit.rs`), because that is what the Python appends. `cmd` has no `/dev/null` — the
+//! equivalent sink is `NUL`. [`shell`] rewrites that one redirection on Windows. This is a
+//! deliberate, documented divergence from the Python string: upstream Panaroo does not run
+//! on Windows at all, so there is no reference behaviour to be faithful to, and the
+//! alternative is a command that silently writes a file called `dev\null`.
 use super::pyfmt::py_repr_bytes;
 use std::process::{Command, Stdio};
+
+/// The platform shell, prepared with `cmd` as its command string.
+///
+/// Unix: `/bin/sh -c <cmd>`, exactly what CPython's `shell=True` spawns.
+/// Windows: `cmd /C <cmd>`, likewise — with `> /dev/null` rewritten to `> NUL`, since the
+/// call sites emit the Python's literal redirection and `cmd` would otherwise create a
+/// file named `dev\null`.
+fn shell(cmd: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let translated = cmd.replace("> /dev/null", "> NUL");
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(translated);
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = Command::new("/bin/sh");
+        c.arg("-c").arg(cmd);
+        c
+    }
+}
 
 /// `subprocess.run(cmd, shell=True, check=True)` — panics on a non-zero exit, as
 /// `CalledProcessError` would.
 pub fn run_shell_check(cmd: &str) {
-    let st = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(cmd)
+    let st = shell(cmd)
         .status()
         .unwrap_or_else(|e| panic!("failed to run {cmd:?}: {e}"));
     if !st.success() {
@@ -38,9 +71,7 @@ pub fn run_shell_check(cmd: &str) {
 
 /// `subprocess.run(cmd, shell=True)` — returns the exit status, no check.
 pub fn run_shell(cmd: &str) -> i32 {
-    Command::new("/bin/sh")
-        .arg("-c")
-        .arg(cmd)
+    shell(cmd)
         .status()
         .unwrap_or_else(|e| panic!("failed to run {cmd:?}: {e}"))
         .code()
@@ -55,9 +86,7 @@ pub struct CompletedProcess {
 }
 
 pub fn run_shell_capture(cmd: &str) -> CompletedProcess {
-    let o = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(cmd)
+    let o = shell(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -87,9 +116,7 @@ pub fn run_shell_capture(cmd: &str) -> CompletedProcess {
 /// which means a tool that prints its version banner to stderr will not be detected. That
 /// is upstream behaviour, preserved.
 pub fn run_shell_capture_repr(cmd: &str) -> String {
-    let o = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(cmd)
+    let o = shell(cmd)
         .stdout(Stdio::piped())
         .output()
         .unwrap_or_else(|e| panic!("failed to run {cmd:?}: {e}"));
@@ -153,15 +180,21 @@ mod tests {
     fn capture_repr_has_the_shape_the_version_probes_regex_over() {
         // python: str(subprocess.run("echo hi", stdout=subprocess.PIPE, shell=True))
         //   == "CompletedProcess(args='echo hi', returncode=0, stdout=b'hi\\n')"
-        assert_eq!(
-            run_shell_capture_repr("echo hi"),
-            r"CompletedProcess(args='echo hi', returncode=0, stdout=b'hi\n')"
-        );
+        //
+        // `cmd`'s echo terminates with CRLF where `sh`'s uses LF, and it is the raw bytes
+        // that go through `py_repr_bytes`. The shape under test -- the repr wrapper the
+        // version probes regex over -- is the same on both.
+        #[cfg(windows)]
+        let expected = r"CompletedProcess(args='echo hi', returncode=0, stdout=b'hi\r\n')";
+        #[cfg(not(windows))]
+        let expected = r"CompletedProcess(args='echo hi', returncode=0, stdout=b'hi\n')";
+        assert_eq!(run_shell_capture_repr("echo hi"), expected);
     }
 
     #[test]
     fn run_shell_reports_exit_status() {
-        assert_eq!(run_shell("true"), 0);
+        // `exit 0` rather than `true`: `true` is a Unix builtin that `cmd` does not have.
+        assert_eq!(run_shell("exit 0"), 0);
         assert_eq!(run_shell("exit 3"), 3);
     }
 

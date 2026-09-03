@@ -12,21 +12,6 @@ Also note that the Panaroo code output is not reproduced due to translation chal
 * 2026-09-02: Initial translation
 
 
-
-## Status
-
-All 92 functions on the `panaroo` entry point are translated, and the pipeline produces
-**byte-identical output** to its reference on real data — 13/13 files across four
-*M. tuberculosis* genomes, including both `--alignment` modes.
-
-"Its reference" is doing real work in that sentence: it is a *patched* Panaroo, not stock.
-[Reproducibility and how much parity to expect](#reproducibility-and-how-much-parity-to-expect)
-explains why, and what that means for you.
-
-**No optimisation has been done yet.** The port deliberately reproduces upstream's hot
-spots so that parity could be established first; they are catalogued in `PORTING_PLAN.md`
-§9 and are the obvious next work. Current runtime is roughly 20% below the Python.
-
 ## Installing
 
 The command-line tool is behind the **`cli` feature, which is off by default**, because
@@ -52,6 +37,33 @@ To use it as a library instead, the default feature set is what you want:
 panaroo-rs = "0.1"        # library only, no clap
 ```
 
+### In-process cd-hit and MAFFT (optional)
+
+By default both external tools are invoked exactly as upstream Panaroo invokes them: as
+subprocesses, from `PATH`. Two further features run them **in-process** instead, via Rust
+translations of each:
+
+| feature | replaces | source |
+|---|---|---|
+| `cdhit-embedded` | `cd-hit`, `cd-hit-est` | [henriksson-lab/cdhit-rs](https://github.com/henriksson-lab/cdhit-rs) (GPL-2.0-or-later) |
+| `mafft-embedded` | `mafft` | [mahogny/rust-MAFFT](https://github.com/mahogny/rust-MAFFT), a fork of luksgrin/rust-MAFFT (MIT AND BSD-3-Clause) |
+
+```sh
+# source build only -- see below
+cargo install --git https://github.com/henriksson-lab/panaroo-rs --features cli,cdhit-embedded,mafft-embedded
+```
+
+These two features are **source-build only.** Neither `cdhit-rs` nor the `rust-MAFFT` fork is
+on crates.io, and cargo resolves git dependencies from crates.io at publish time, so a
+`cargo install panaroo-rs` from the registry cannot enable them (and, until that changes,
+the crate itself cannot be packaged for the registry at all — see `PORTING_PLAN.md` §11 K).
+
+Both are verified byte-identical against the real tools on the parity suite — cd-hit on all
+13 output files at `-t 1`, MAFFT on all 5,096 per-gene alignments — and both integrations
+drive the translated tool with the **same argv** the subprocess path would have built, so
+flag semantics have exactly one definition. Note that `cdhit-embedded` pulls a GPL-2.0
+dependency into the build.
+
 Requires Rust **1.85** or newer (a floor set by `clap` and `indexmap`, not by this code).
 
 The binary is named `panaroo`, matching upstream's CLI so it is a drop-in replacement.
@@ -71,6 +83,49 @@ tests/parity/e2e.sh ci
 ```
 
 See `tests/parity/README.md` for the rest of the suite.
+
+## Performance
+
+Same input, same output — all 13 output files byte-identical — on 4 *M. tuberculosis*
+genomes (`--clean-mode strict`, 20 threads):
+
+| | Python Panaroo | panaroo-rs | ratio |
+|---|---|---|---|
+| wall clock | 66.6 s | 43.2 s | **1.5×** faster |
+| CPU time (user + sys) | 621 s | 552 s | 1.1× less |
+| peak memory (tree PSS) | 1604 MB | 462 MB | **3.5×** less |
+
+Three caveats, because a benchmark table without them is worse than none:
+
+- **Single run, on a machine that was not idle** (load average 9.1 on 40 logical CPUs).
+  Wall-clock time is the number most contaminated by that; treat 1.5× as a rough
+  magnitude, not a measurement. Re-run with `tests/bench/run.sh ci -n 5 -T 20` on a quiet
+  box for figures with a measured spread.
+- **The CPU-time ratio (1.1×) is largely an artefact and should not be read as "the two
+  implementations do about the same amount of work".** Both sides invoke the same external
+  `cd-hit` binary 12 times per run with identical flags, and that binary is 60–75% of the
+  CPU time. Worse, cd-hit's own CPU cost is *superlinear in its thread count* — measured at
+  9.67 CPU-s with `-T 1` against 19.96 CPU-s with `-T 20`, a 2.07× penalty — so at `-t 20`
+  most of both CPU columns is shared work that no port can change, inflated by cd-hit's
+  threading overhead. The pipeline's own code is a minority of the total on this dataset.
+  A meaningful CPU-time comparison needs `-t 1`, or needs cd-hit's time subtracted out.
+- **The memory figure is tree PSS, not `time -v` max-RSS.** Max-RSS reports the largest
+  single process, which for both implementations is the same `cd-hit` child (389 vs 388 MB
+  — an artefact, not a result). The real difference is structural: Python parallelises by
+  forking a `multiprocessing` pool (26 processes here), Rust with threads in one process
+  (4 processes). Summed proportional set size across the whole process tree is what
+  captures that.
+
+Hardware: Xeon Gold 6138, 1 socket, 20 physical / 40 logical cores. `-t 20` is one thread
+per physical core. Full harness, raw numbers and methodology: `tests/bench/`.
+
+**What this configuration does *not* measure.** It runs without `-a/--alignment`, so mafft
+is never invoked by either side and the whole alignment stage is skipped. That stage is
+where the largest optimisation in the port lives — `output_sequence` used to re-parse the
+whole combined FASTA once per gene cluster, ~99.8 GB per run, now parsed once — worth
+**1.24× wall and 2.23× peak RSS** on `--alignment core`, and completely invisible here.
+Conversely, that path is dominated by ~5,100 mafft invocations, which are not ours to
+speed up. Neither configuration alone is representative.
 
 ## Reproducibility and how much parity to expect
 
@@ -95,6 +150,29 @@ We believe this is an upstream bug rather than a deliberate choice, because Pana
 applies `sorted()` at two of these sites (`find_missing.py:52,77`) — the pattern is
 established, just not applied consistently. It is written up as B6 in
 `ORIGINAL_CODE_BUG.md`, in a form usable as an upstream issue report.
+
+### A second source of nondeterminism: cd-hit itself, when threaded
+
+The above concerns Panaroo's own Python. There is a second, independent source, and it sits
+below both implementations: **upstream cd-hit produces nondeterministic output when run
+multithreaded.** Panaroo passes `-t/--threads` straight through as cd-hit's `-T`, so any run
+with `-t > 1` inherits it.
+
+This matters more than it might appear, because cd-hit's clustering is the *first* stage:
+its `.clstr` output becomes the nodes of the pangenome graph, so a difference there
+propagates into every downstream file. It also means:
+
+- **Panaroo's output is not reproducible at `-t > 1` regardless of implementation**, and no
+  amount of determinism work inside Panaroo — including this port's Tier D patches — can fix
+  it, because the nondeterminism is in a separate program.
+- **A parity failure at `-t > 1` may be spurious.** Both sides invoke the same cd-hit binary
+  independently, so the two runs can legitimately disagree without either implementation
+  being wrong. Reproduce any failure at `-t 1` before treating it as a real defect.
+
+What we have actually observed here: the parity suite runs at `-t 8` by default and has been
+byte-identical across all 13 output files on the `ci` dataset consistently. That does not
+disprove the nondeterminism — it suggests this dataset does not reliably trigger it — and it
+should not be read as a guarantee. Treat `-t 1` as the reproducible configuration.
 
 ### What this port is compared against
 
@@ -172,11 +250,3 @@ Two points worth a lawyer's eye before release:
   so it does not impose the GPL on this code — but do not bundle those binaries into a
   distribution without checking that separately.
 
-## Documentation
-
-| file | what |
-|---|---|
-| `PORTING_PLAN.md` | the translation plan, parity strategy, and deferred optimisations |
-| `ORIGINAL_CODE_BUG.md` | bugs found in upstream Panaroo, with measured effects |
-| `NOTICE.md` | third-party attribution — what is reimplemented, vendored, or wrapped |
-| `port_order.csv` | the 92-function bottom-up checklist |

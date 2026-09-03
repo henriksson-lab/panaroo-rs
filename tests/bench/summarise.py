@@ -94,7 +94,7 @@ def sig2(x):
     if x >= 10:
         return f"{x:.0f}"
     if x >= 1:
-        return f"{x:.2f}".rstrip("0").rstrip(".")
+        return f"{x:.1f}"
     return f"{x:.2g}"
 
 

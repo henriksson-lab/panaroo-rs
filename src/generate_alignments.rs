@@ -658,20 +658,97 @@ pub fn check_aligner_sanity(aligner: &str, codons: bool, isolate_count: usize) -
 
 // --- writing per-gene input files -------------------------------------------------------
 
-/// `generate_alignments.py::output_sequence`
+/// `combined_DNA_CDS.fasta`, parsed once for a whole alignment stage.
 ///
-/// PORTING_PLAN.md §9 item 1: re-parses the whole `combined_DNA_CDS.fasta` for every gene.
-/// This is the single worst hot spot in the pipeline. It stays until parity is signed off.
+/// **Not a Python object.** It exists to retire PORTING_PLAN.md §9 item 1: the Python
+/// `output_sequence` calls `SeqIO.parse(outdir + "combined_DNA_CDS.fasta")` *inside* itself,
+/// so the entire file is re-read and re-parsed once per gene cluster — O(n_genes × filesize),
+/// with every joblib worker hammering the same file. On the `ci` parity dataset that is
+/// 5,116 clusters × 19,507,986 bytes ≈ **99.8 GB parsed** and ~1.1 × 10⁹ heap allocations
+/// per run, and it is quadratic in genome count. This type hoists the parse to the caller so
+/// it happens exactly once.
+///
+/// The caller-side hoist is the one deviation from PORTING_PLAN.md rule 2 in this module,
+/// and it is deliberate: the loop body itself is transcribed unchanged, only the *number of
+/// times the file is read* differs.
+///
+/// # What has to hold
+///
+/// **File order is load-bearing.** The Python appends matches while iterating the FASTA, so
+/// the records handed to the aligner are in **file** order. That is *not* `seqIDs` order:
+/// `node.seq_ids` is a `BTreeSet<String>` ordered lexicographically, so it puts `"0_10_0"`
+/// before `"0_2_0"` while the file does the opposite. Record order reaches mafft's input
+/// file, and mafft's output depends on it — so [`output_sequence`] looks positions up and
+/// then **sorts them ascending**, reproducing a file scan exactly. Never iterate `by_id`,
+/// and never iterate `seq_ids` to build the output.
+///
+/// **Duplicate IDs.** `by_id` maps an ID to *every* position it occupies, so a FASTA with a
+/// repeated ID yields the same repeated records a scan would. (The `ci` file has 0 duplicates
+/// among its 20,516 records; the `Vec` makes the equivalence unconditional rather than
+/// dataset-dependent.)
+///
+/// **Panics.** `isolate_num` is parsed and `isolate_list` indexed for *every* record, exactly
+/// as the per-gene scan did, so a malformed or out-of-range record ID still aborts the run
+/// even when no gene selects it.
+pub struct CombinedDna {
+    /// Records in file order.
+    records: Vec<crate::support::seqio::SeqRecord>,
+    /// `isolate_list[n].replace(";", "") + ";" + seq.id` per record, same order.
+    ///
+    /// Precomputed here because the Python recomputes it for every record on every gene:
+    /// 5,116 × 20,516 = 105 M `format!` + `replace` pairs on `ci`.
+    names: Vec<String>,
+    /// Sequence ID -> its positions in `records`, ascending.
+    by_id: std::collections::HashMap<String, Vec<usize>>,
+}
+
+impl CombinedDna {
+    /// Parse `{outdir}combined_DNA_CDS.fasta` and precompute the per-record isolate names.
+    ///
+    /// Safe to hoist out of the per-gene loop because nothing in the alignment stage writes
+    /// this file: it is produced by `prokka::output_files` and appended by `find_missing`,
+    /// both long before `main` reaches the alignment stage, and the alignment workers only
+    /// write into `temp_directory` and `outdir/aligned_gene_sequences/`.
+    pub fn load(outdir: &str, isolate_list: &[String]) -> CombinedDna {
+        // `isolate_list[i].replace(";", "")` depends only on `i`, so it is computed once per
+        // isolate rather than once per record. Indexing is unchanged, so an out-of-range
+        // isolate_num panics exactly as before.
+        let clean_isolates: Vec<String> = isolate_list.iter().map(|s| s.replace(';', "")).collect();
+
+        let records =
+            crate::support::seqio::parse_fasta_file(&format!("{outdir}combined_DNA_CDS.fasta"));
+
+        let mut names: Vec<String> = Vec::with_capacity(records.len());
+        let mut by_id: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::with_capacity(records.len());
+        for (i, seq) in records.iter().enumerate() {
+            let isolate_num: usize = seq.id.split('_').next().unwrap().parse().unwrap();
+            names.push(format!("{};{}", clean_isolates[isolate_num], seq.id));
+            by_id.entry(seq.id.clone()).or_default().push(i);
+        }
+
+        CombinedDna {
+            records,
+            names,
+            by_id,
+        }
+    }
+}
+
+/// `generate_alignments.py::output_sequence`
 ///
 /// Returns the written path, or `None` when the gene had a single sequence (in which case
 /// the record is written straight to the aligned directory and no alignment is scheduled).
+///
+/// Takes a pre-parsed [`CombinedDna`] in place of the Python's `isolate_list`, which is the
+/// fix for PORTING_PLAN.md §9 item 1 — see that type for why it is equivalent.
 pub fn output_sequence(
     node: &NodeAttrs,
-    isolate_list: &[String],
+    combined_dna: &CombinedDna,
     temp_directory: &str,
     outdir: &str,
 ) -> Option<String> {
-    use crate::support::seqio::{parse_fasta_file, write_fasta_file, SeqRecord};
+    use crate::support::seqio::{write_fasta_file, SeqRecord};
 
     // Get the name of the sequences for the gene of interest
     let sequence_ids = &node.seq_ids;
@@ -679,20 +756,26 @@ pub fn output_sequence(
     // Counter for the number of sequences for downstream check of >1
     let mut isolate_no = 0usize;
 
-    // Look for gene sequences among all genes (from disk).
-    //
-    // PORTING_PLAN.md §9 item 1: this re-parses the entire combined_DNA_CDS.fasta for
-    // EVERY gene -- O(n_genes x filesize), and every worker hammers the same file. It is
-    // the worst hot spot in the pipeline. Preserved until parity is signed off; the codon
-    // path right next to it already parses once into a dict, so the fix is obvious when
-    // the time comes.
-    for seq in parse_fasta_file(&format!("{outdir}combined_DNA_CDS.fasta")) {
-        let isolate_num: usize = seq.id.split('_').next().unwrap().parse().unwrap();
-        let isolate_name = format!("{};{}", isolate_list[isolate_num].replace(';', ""), seq.id);
-        if sequence_ids.contains(&seq.id) {
-            output_sequences.push(SeqRecord::new(seq.seq.clone(), isolate_name, String::new()));
-            isolate_no += 1;
+    // Look for gene sequences among all genes. The Python scans the whole combined FASTA
+    // here and keeps the records whose id is in `seqIDs`, which yields them in FILE order;
+    // sorting the looked-up positions reproduces that scan exactly. Iterating `sequence_ids`
+    // instead would emit them in BTreeSet (lexicographic) order, which is a different order
+    // and reaches the aligner's input file.
+    let mut positions: Vec<usize> = Vec::new();
+    for seq_id in sequence_ids.iter() {
+        if let Some(idxs) = combined_dna.by_id.get(seq_id.as_str()) {
+            positions.extend_from_slice(idxs);
         }
+    }
+    positions.sort_unstable();
+
+    for i in positions {
+        output_sequences.push(SeqRecord::new(
+            combined_dna.records[i].seq.clone(),
+            combined_dna.names[i].clone(),
+            String::new(),
+        ));
+        isolate_no += 1;
     }
 
     // set filename to gene name, if more than one sequence to be aligned
@@ -915,6 +998,9 @@ pub fn align_sequences(command: &AlignCommand, outdir: &str, aligner: &str) -> b
         // mafft writes to stdout; the output file name is derived from the last token of
         // the command, which is the input path.
         let name = gene_name_of(cmd.split_whitespace().last().unwrap_or(""));
+        #[cfg(feature = "mafft-embedded")]
+        let stdout = crate::mafft_embedded::run_mafft(cmd);
+        #[cfg(not(feature = "mafft-embedded"))]
         let (stdout, _stderr) = crate::support::proc::popen_communicate(cmd);
         std::fs::write(format!("{outdir}{name}.aln.fas"), stdout).expect("write alignment");
     } else {

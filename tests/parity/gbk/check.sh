@@ -12,7 +12,7 @@ gbk="${1:-$repo/tests/parity/build/data/gbk/GCF_000759575.2.gbff}"
 [[ -f "$gbk" ]] || { echo "no GenBank fixture at $gbk -- run tests/parity/data/fetch.sh gbk" >&2; exit 1; }
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
-cargo build --release --example dump_gbk --manifest-path "$repo/Cargo.toml" >/dev/null 2>&1
+cargo build --release --example dump_gbk --manifest-path "$repo/Cargo.toml" >/dev/null
 ( cd "$repo/tests/parity/build/reference" && python3 -c "
 import sys
 from panaroo.biocode_convert import convert_gbk_gff3

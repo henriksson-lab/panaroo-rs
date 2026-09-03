@@ -41,6 +41,9 @@ pub use args::Args;
 // --- 1:1 with panaroo/panaroo/*.py -----------------------------------------------------
 pub mod biocode_convert;
 pub mod cdhit;
+pub mod cdhit_backend;
+#[cfg(feature = "cdhit-embedded")]
+pub mod cdhit_embedded;
 pub mod clean_network;
 pub mod find_missing;
 pub mod generate_alignments;
@@ -48,6 +51,8 @@ pub mod generate_network;
 pub mod generate_output;
 pub mod get_neighborhood;
 pub mod isvalid;
+#[cfg(feature = "mafft-embedded")]
+pub mod mafft_embedded;
 pub mod merge_nodes;
 pub mod prokka;
 pub mod set_default_args;

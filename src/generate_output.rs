@@ -487,17 +487,24 @@ pub fn generate_pan_genome_alignment(
             Some(total_gene_count),
         );
 
-        let isolates_v = isolates.to_vec();
         let td = temp_dir.clone();
         let od = output_dir.to_string();
-        let jobs: Vec<crate::support::graph::NodeAttrs> = pending_gene_ids
-            .iter()
-            .map(|&x| g.node(x).clone())
-            .collect();
-        let unaligned: Vec<Option<String>> =
+        // A borrow, not a clone: `output_sequence` only reads the node, and `NodeAttrs`
+        // owns the `dna`/`protein` sequence lists -- cloning every pending node duplicated
+        // the whole gene set for the duration of the stage.
+        let jobs: Vec<&crate::support::graph::NodeAttrs> =
+            pending_gene_ids.iter().map(|&x| g.node(x)).collect();
+        // PORTING_PLAN.md §9 item 1: parse combined_DNA_CDS.fasta ONCE for the stage rather
+        // than once per gene inside `output_sequence`. Guarded on non-empty so that a run
+        // with nothing pending still never opens the file, as before.
+        let unaligned: Vec<Option<String>> = if jobs.is_empty() {
+            Vec::new()
+        } else {
+            let combined_dna = CombinedDna::load(output_dir, isolates);
             crate::support::parallel::parallel_map(threads, jobs, move |node| {
-                output_sequence(&node, &isolates_v, &td, &od)
-            });
+                output_sequence(node, &combined_dna, &td, &od)
+            })
+        };
         let unaligned: Vec<String> = unaligned.into_iter().flatten().collect();
 
         if aligner == "none" {
@@ -941,17 +948,20 @@ pub fn generate_core_genome_alignment(
             pending_gene_ids.len(),
             Some(total_gene_count),
         );
-        let isolates_v = isolates.to_vec();
         let td = temp_dir.clone();
         let od = output_dir.to_string();
-        let jobs: Vec<crate::support::graph::NodeAttrs> = pending_gene_ids
-            .iter()
-            .map(|&x| g.node(x).clone())
-            .collect();
-        let unaligned: Vec<Option<String>> =
+        // A borrow, not a clone -- see the matching comment in generate_pan_genome_alignment.
+        let jobs: Vec<&crate::support::graph::NodeAttrs> =
+            pending_gene_ids.iter().map(|&x| g.node(x)).collect();
+        // PORTING_PLAN.md §9 item 1: one parse of combined_DNA_CDS.fasta for the stage.
+        let unaligned: Vec<Option<String>> = if jobs.is_empty() {
+            Vec::new()
+        } else {
+            let combined_dna = CombinedDna::load(output_dir, isolates);
             crate::support::parallel::parallel_map(threads, jobs, move |node| {
-                output_sequence(&node, &isolates_v, &td, &od)
-            });
+                output_sequence(node, &combined_dna, &td, &od)
+            })
+        };
 
         if aligner == "none" {
             println!("No aligner specified. Returning unaligned gene fasta files.");

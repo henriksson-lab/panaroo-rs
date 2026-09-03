@@ -55,6 +55,31 @@ fn find_version(text: &str) -> Option<f64> {
     None
 }
 
+/// Dispatch one assembled cd-hit command.
+///
+/// Default: hand it to the shell, exactly as `subprocess.run(cmd, shell=True, check=True)`
+/// does. With the `cdhit-embedded` feature: run the translated cd-hit in-process instead,
+/// which removes a `fork`/`exec` per call (12 per run) but leaves every file it reads and
+/// writes exactly where it was.
+///
+/// `est` selects the nucleotide front-end, which differs from the protein one in its
+/// pre-parse defaults and alphabet -- see [`crate::cdhit_embedded`].
+fn dispatch_cdhit(cmd: &str, #[allow(unused_variables)] est: bool) {
+    #[cfg(feature = "cdhit-embedded")]
+    {
+        let argv = crate::cdhit_embedded::argv_from_command(cmd);
+        if est {
+            crate::cdhit_embedded::run_cd_hit_est_main(&argv);
+        } else {
+            crate::cdhit_embedded::run_cd_hit_main(&argv);
+        }
+    }
+    #[cfg(not(feature = "cdhit-embedded"))]
+    {
+        crate::support::proc::run_shell_check(cmd);
+    }
+}
+
 /// `cdhit.py::run_cdhit`
 ///
 /// Emits the flags in exactly the Python's order. Numeric flags go through Python's
@@ -122,7 +147,7 @@ pub fn run_cdhit(
         cmd += " > /dev/null";
     }
 
-    crate::support::proc::run_shell_check(&cmd);
+    dispatch_cdhit(&cmd, false);
 }
 
 /// `cdhit.py::run_cdhit_est`
@@ -188,7 +213,7 @@ pub fn run_cdhit_est(
         cmd += " > /dev/null";
     }
 
-    crate::support::proc::run_shell_check(&cmd);
+    dispatch_cdhit(&cmd, true);
 }
 
 /// `cdhit.py::iterative_cdhit`
@@ -397,7 +422,12 @@ pub fn pwdist_edlib(
     // PORTING_PLAN.md §9 item 2: the Python creates a fresh joblib pool per cluster. Result
     // order is unaffected, so one pool over the flattened pair list is observationally
     // identical -- see support::parallel.
-    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut pairs: Vec<(String, String)> = Vec::with_capacity(
+        cdhit_clusters
+            .iter()
+            .map(|c| c.len() * c.len().saturating_sub(1) / 2)
+            .sum(),
+    );
     for cluster in cdhit_clusters {
         for i in 0..cluster.len() {
             for j in (i + 1)..cluster.len() {
@@ -407,7 +437,7 @@ pub fn pwdist_edlib(
     }
 
     let all_distances = crate::support::parallel::parallel_map(n_cpu, pairs, |(c1, c2)| {
-        run_pw(
+        run_pw_thresholded(
             centroid_to_seq
                 .get(&c1)
                 .unwrap_or_else(|| panic!("KeyError: {c1}")),
@@ -417,6 +447,7 @@ pub fn pwdist_edlib(
             centroid_to_index[&c1],
             centroid_to_index[&c2],
             dna,
+            threshold,
         )
     });
 
@@ -467,6 +498,30 @@ fn centroid_to_seq(g: &Graph, dna: bool) -> crate::support::pydict::PyDict<Strin
 /// only ever assigned `max(pwid, ...)`, so the intended `pwid = max(pwid, 0.0)` is a no-op
 /// too. Transcribe the branch as a no-op and do not "fix" it. See ORIGINAL_CODE_BUG.md B3.
 pub fn run_pw(seq_a: &str, seq_b: &str, n1: usize, n2: usize, dna: bool) -> (usize, usize, f64) {
+    // NEG_INFINITY disables the extra bound, so this is the Python's `k` exactly.
+    run_pw_thresholded(seq_a, seq_b, n1, n2, dna, f64::NEG_INFINITY)
+}
+
+/// [`run_pw`] with the caller's identity threshold used as an additional edlib `k` bound.
+///
+/// The only consumer of `run_pw`'s float is `pwdist_edlib`'s `d.2 >= threshold`. An
+/// alignment rejected by the tighter bound has `editDistance > (1 - threshold) * len(seqA)`,
+/// hence `1 - ed/len < threshold`, so it could only ever have contributed a value BELOW the
+/// threshold -- and dropping a value below `T` from a `max` cannot change `max >= T`. When
+/// every strand is rejected the result is `0.0`, which is `< T` for any `T > 0`. So the
+/// boolean the caller computes is unchanged, while edlib's Ukkonen band
+/// (`ceil((k+1)/64)` blocks) shrinks by up to 8x on the DNA pass.
+///
+/// The returned float itself is NOT the same for rejected pairs, which is why `run_pw`
+/// keeps the unbounded behaviour for any other caller.
+fn run_pw_thresholded(
+    seq_a: &str,
+    seq_b: &str,
+    n1: usize,
+    n2: usize,
+    dna: bool,
+    threshold: f64,
+) -> (usize, usize, f64) {
     use crate::support::edlib::{align, Mode, Task};
 
     let (seq_a, seq_b) = if seq_a.len() > seq_b.len() {
@@ -475,18 +530,20 @@ pub fn run_pw(seq_a: &str, seq_b: &str, n1: usize, n2: usize, dna: bool) -> (usi
         (seq_a, seq_b)
     };
 
+    // The Python's bound, unchanged.
+    let k_python = (0.5 * seq_a.len() as f64) as i64;
+    let k = if threshold.is_finite() && threshold > 0.0 {
+        let k_thresh = (((1.0 - threshold) * seq_a.len() as f64).ceil() as i64 + 1).max(0);
+        k_python.min(k_thresh)
+    } else {
+        k_python
+    };
+
     let pwid = if dna {
         let mut acc = 0.0f64;
         let rc = crate::support::seq::reverse_complement(seq_a);
         for s_a in [seq_a, rc.as_str()] {
-            let aln = align(
-                s_a,
-                seq_b,
-                Mode::Hw,
-                Task::Distance,
-                (0.5 * seq_a.len() as f64) as i64,
-                &DNA_N_EQUALITIES,
-            );
+            let aln = align(s_a, seq_b, Mode::Hw, Task::Distance, k, &DNA_N_EQUALITIES);
             if aln.edit_distance == -1 {
                 // UPSTREAM: the Python writes `pqid = max(pwid, 0.0)` here -- a typo, since
                 // `pqid` is never read. It is provably behaviour-neutral: `pwid` starts at
@@ -504,7 +561,7 @@ pub fn run_pw(seq_a: &str, seq_b: &str, n1: usize, n2: usize, dna: bool) -> (usi
             seq_b,
             Mode::Hw,
             Task::Distance,
-            (0.5 * seq_a.len() as f64) as i64,
+            k,
             &PROTEIN_X_EQUALITIES,
         );
         if aln.edit_distance == -1 {

@@ -151,22 +151,37 @@ impl CsrMatrix {
         }
     }
 
+    /// The transpose half of [`Self::undirected_neighbours`], precomputed once.
+    ///
+    /// `rev[v]` is exactly the sequence the old inner `for r in 0..shape.0` scan produced
+    /// for `v`: every row `r` storing a nonzero at column `v`, in ascending `r`, once per
+    /// stored entry. Built by the same ascending scan with the same `data[k] != 0` filter,
+    /// so it is element-for-element identical -- this hoists a loop-invariant scan out of
+    /// the flood fill, it does not change traversal.
+    fn transpose_lists(&self) -> Vec<Vec<usize>> {
+        let mut rev: Vec<Vec<usize>> = vec![Vec::new(); self.shape.0.max(self.shape.1)];
+        for r in 0..self.shape.0 {
+            for k in self.indptr[r]..self.indptr[r + 1] {
+                if self.data[k] != 0 {
+                    rev[self.indices[k]].push(r);
+                }
+            }
+        }
+        rev
+    }
+
     /// Neighbours of `v`, treating the matrix as undirected (`directed=False`).
-    fn undirected_neighbours(&self, v: usize) -> Vec<usize> {
+    ///
+    /// `rev` comes from [`Self::transpose_lists`] on this same matrix.
+    fn undirected_neighbours(&self, v: usize, rev: &[Vec<usize>]) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
         for k in self.indptr[v]..self.indptr[v + 1] {
             if self.data[k] != 0 {
                 out.push(self.indices[k]);
             }
         }
-        // the transpose direction
-        for r in 0..self.shape.0 {
-            for k in self.indptr[r]..self.indptr[r + 1] {
-                if self.indices[k] == v && self.data[k] != 0 {
-                    out.push(r);
-                }
-            }
-        }
+        // the transpose direction, precomputed
+        out.extend_from_slice(&rev[v]);
         out
     }
 }
@@ -179,6 +194,7 @@ impl CsrMatrix {
 /// observed cases this reproduces.
 pub fn connected_components(m: &CsrMatrix, _directed: bool) -> (usize, Vec<i64>) {
     let n = m.shape.0;
+    let rev = m.transpose_lists();
     let mut labels = vec![-1i64; n];
     let mut ncomp = 0i64;
     for v in 0..n {
@@ -189,7 +205,7 @@ pub fn connected_components(m: &CsrMatrix, _directed: bool) -> (usize, Vec<i64>)
         let mut stack = vec![v];
         labels[v] = ncomp;
         while let Some(u) = stack.pop() {
-            for w in m.undirected_neighbours(u) {
+            for w in m.undirected_neighbours(u, &rev) {
                 if labels[w] == -1 {
                     labels[w] = ncomp;
                     stack.push(w);

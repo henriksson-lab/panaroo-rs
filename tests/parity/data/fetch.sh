@@ -21,6 +21,8 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
+# shellcheck source=tests/lib/safe_rm.sh
+source "$repo/tests/lib/safe_rm.sh"
 out="$repo/tests/parity/build/data"
 
 CI_URL="https://github.com/gtonkinhill/panaroo_test_data/releases/download/v0.0.2/travis_test_data.zip"
@@ -34,12 +36,12 @@ fetch_ci() {
     curl -fL --retry 3 -o "$zip" "$CI_URL"
   fi
   echo "$CI_SHA  $zip" | sha256sum -c - || { echo "checksum mismatch; refusing" >&2; exit 1; }
-  rm -rf "$out/ci" "$out/__MACOSX"
+  safe_rm_rf "$repo/tests" "$out/ci" "$out/__MACOSX"
   unzip -q -o "$zip" -d "$out"
   # The release zip was built on macOS and carries a __MACOSX sidecar tree of AppleDouble
   # "._name" stubs. They have .gff names but are not GFF3, so anything globbing *.gff picks
   # them up and chokes.
-  rm -rf "$out/__MACOSX"
+  safe_rm_rf "$repo/tests" "$out/__MACOSX"
   find "$out/travis_test_data" -name '._*' -delete
   mv "$out/travis_test_data" "$out/ci"
   # aa1..aa4 are the four real M. tuberculosis draft assemblies. aln.gff (9 CDS) and
@@ -56,7 +58,7 @@ fetch_ci() {
 fetch_smoke() {
   local n="${1:-4}"
   [[ -d "$out/ci" ]] || fetch_ci
-  rm -rf "$out/smoke"; mkdir -p "$out/smoke"
+  safe_rm_rf "$repo/tests" "$out/smoke"; mkdir -p "$out/smoke"
   for f in "$out"/ci/aa[1-4].gff; do
     python3 "$here/subset_gff.py" "$f" "$out/smoke/$(basename "$f")" --contigs "$n"
   done
@@ -66,7 +68,7 @@ fetch_smoke() {
 
 fetch_scale() {
   local n="${1:-20}" taxid="${2:-573}"   # 573 = Klebsiella pneumoniae
-  rm -rf "$out/scale"; mkdir -p "$out/scale/raw"
+  safe_rm_rf "$repo/tests" "$out/scale"; mkdir -p "$out/scale/raw"
   python3 "$here/fetch_refseq.py" --taxid "$taxid" --n "$n" --outdir "$out/scale/raw"
   local conv="$repo/panaroo/scripts/convert_refseq_to_prokka_gff.py"
   for g in "$out"/scale/raw/*_genomic.gff; do

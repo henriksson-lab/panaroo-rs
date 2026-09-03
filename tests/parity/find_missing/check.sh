@@ -11,7 +11,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
-cargo build --release --example dump_find_missing --manifest-path "$repo/Cargo.toml" >/dev/null 2>&1
+cargo build --release --example dump_find_missing --manifest-path "$repo/Cargo.toml" >/dev/null
 python3 "$here/cases.py" > "$tmp/py.tsv"
 "$repo/target/release/examples/dump_find_missing" "$tmp/py.tsv" > "$tmp/rs.tsv"
 

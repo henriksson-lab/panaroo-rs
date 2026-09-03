@@ -10,7 +10,8 @@
 #   -T LIST      comma-separated thread counts (default 1,10)
 #   -m MODE      --clean-mode, passed to BOTH sides (default strict)
 #   -r DIR       reference tree (default tests/parity/build/reference)
-#   -o DIR       results/scratch dir (default tests/bench/build)
+#   -o DIR       results/scratch dir (default tests/bench/build); use an ABSOLUTE path
+#   -F FEATS     cargo features for the Rust build (default cli)
 #   -k           keep the per-run output directories (default: deleted after measuring)
 #   -V           skip the output-equivalence verification
 #   -P           python only (skip the Rust side)
@@ -24,6 +25,8 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
+# shellcheck source=tests/lib/safe_rm.sh
+source "$repo/tests/lib/safe_rm.sh"
 parity_build="$repo/tests/parity/build"
 
 ref="$parity_build/reference"
@@ -31,19 +34,23 @@ outroot="$here/build"
 repeats=3
 threadlist="1,10"
 mode=strict
+# Cargo features for the Rust build. `cli` is required (the binary is behind it);
+# add e.g. `cli,mafft-embedded` to measure an embedded-aligner build.
+features=cli
 keep=0
 verify=1
 python_only=0
 
 dataset="${1:-ci}"
 if [[ $# -gt 0 && "$dataset" != -* ]]; then shift; else dataset=ci; fi
-while getopts "n:T:m:r:o:kVP" opt; do
+while getopts "n:T:m:r:o:F:kVP" opt; do
   case "$opt" in
     n) repeats="$OPTARG" ;;
     T) threadlist="$OPTARG" ;;
     m) mode="$OPTARG" ;;
     r) ref="$OPTARG" ;;
     o) outroot="$OPTARG" ;;
+    F) features="$OPTARG" ;;
     k) keep=1 ;;
     V) verify=0 ;;
     P) python_only=1 ;;
@@ -117,9 +124,9 @@ else
   # cli the [[bin]] target is simply skipped and cargo exits 0 having built nothing. So
   # delete the binary first -- if the build silently skips it, the file is absent and we
   # fail loudly instead of timing a stale binary from some earlier build.
-  echo "== cargo build --release --features cli =="
+  echo "== cargo build --release --features $features =="
   rm -f "$rsbin"
-  if cargo build --release --features cli --manifest-path "$repo/Cargo.toml" 2>&1 | tail -5; then
+  if cargo build --release --features "$features" --manifest-path "$repo/Cargo.toml" 2>&1 | tail -5; then
     if [[ -x "$rsbin" ]]; then
       rust_note="ok ($("$rsbin" --version 2>/dev/null | head -1 || echo 'no --version'))"
     else
@@ -127,7 +134,7 @@ else
       rust_note="build reported success but $rsbin does not exist (missing --features cli?)"
     fi
   else
-    rust_ok=0; rust_note="cargo build --release --features cli FAILED"
+    rust_ok=0; rust_note="cargo build --release --features $features FAILED"
   fi
   [[ "$rust_ok" == 0 ]] && echo "bench: WARNING Rust side unavailable: $rust_note" >&2
 fi
@@ -220,7 +227,7 @@ measure() {
   local lf="$run_dir/logs/$tag.log"
   local cmdline pid st
 
-  rm -rf "$out"; mkdir -p "$out"
+  safe_rm_rf "$repo/tests" "$out"; mkdir -p "$out"
 
   if [[ "$impl" == python ]]; then
     cmdline="(cd $ref && PYTHONHASHSEED=0 $python_bin -m panaroo -i $input -o $out --clean-mode $mode -t $th ${extra[*]:-})"
@@ -306,13 +313,13 @@ for rep in $(seq 1 "$repeats"); do
   done
 done
 
-if [[ "$keep" == 0 ]]; then rm -rf "$run_dir/out"; fi
+if [[ "$keep" == 0 ]]; then safe_rm_rf "$repo/tests" "$run_dir/out"; fi
 
 # ----------------------------------------------------------------------- summary ---
 echo
 echo "==================================== SUMMARY ===================================="
 echo "dataset $name ($n_genomes genomes)   clean-mode $mode   extra args: ${extra[*]:-<none>}"
-echo "repeats $repeats (+1 warm-up discarded)   host $(hostname), $ncpu logical cores"
+echo "repeats $repeats (+1 warm-up discarded)   host $(hostname), ${ncpu_phys:-?} physical / $ncpu logical cores"
 echo "cpu   $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
 echo "load  start $load_start / end $(cut -d' ' -f1-3 /proc/loadavg) (1/5/15 min)"
 echo "idle  $idle_note"
@@ -332,7 +339,7 @@ HOW TO READ THE MEMORY COLUMNS
                    GNU time prints it. This is the peak of the SINGLE LARGEST process in
                    the tree -- it is NOT a sum. Both implementations spawn cd-hit (and
                    mafft when -a is given), and the Python side forks a multiprocessing
-                   pool, so at -t 10 this number can badly understate the machine-level
+                   pool, so at high -t this number can badly understate the machine-level
                    footprint. It is kept because it is exact and trivially reproducible.
 
   tree peak PSS    Peak of (sum of Pss over the root process and every live descendant),

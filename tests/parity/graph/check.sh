@@ -13,7 +13,7 @@ repo="$(cd "$here/../../.." && pwd)"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
 python3 -c "import networkx" 2>/dev/null || { echo "networkx not importable -- conda activate panaroo-parity" >&2; exit 1; }
-cargo build --release --example dump_graph --manifest-path "$repo/Cargo.toml" >/dev/null 2>&1
+cargo build --release --example dump_graph --manifest-path "$repo/Cargo.toml" >/dev/null
 
 ops="${1:-$here/ops.txt}"
 python3 "$here/dump_networkx.py" "$ops" > "$tmp/py.txt"

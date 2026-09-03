@@ -11,15 +11,17 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
+# shellcheck source=tests/lib/safe_rm.sh
+source "$repo/tests/lib/safe_rm.sh"
 dataset="${1:-ci}"
 threads="${THREADS:-8}"
 input="$repo/tests/parity/build/data/$dataset/input.txt"
 [[ -f "$input" ]] || { echo "no input at $input -- run tests/parity/data/fetch.sh $dataset" >&2; exit 1; }
 
 out="$repo/tests/parity/build/out/prokka/$dataset"
-rm -rf "$out"; mkdir -p "$out/py" "$out/rs"
+safe_rm_rf "$repo/tests" "$out"; mkdir -p "$out/py" "$out/rs"
 
-cargo build --release --example run_prokka_stage --manifest-path "$repo/Cargo.toml" >/dev/null 2>&1
+cargo build --release --example run_prokka_stage --manifest-path "$repo/Cargo.toml" >/dev/null
 PYTHONHASHSEED=0 python3 "$here/run_reference.py" "$input" "$out/py" "$threads" >/dev/null 2>&1
 "$repo/target/release/examples/run_prokka_stage" "$input" "$out/rs" "$threads" >/dev/null 2>&1
 

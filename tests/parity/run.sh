@@ -16,6 +16,8 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
+# shellcheck source=tests/lib/safe_rm.sh
+source "$repo/tests/lib/safe_rm.sh"
 build="$repo/tests/parity/build"
 
 ref="$build/reference"
@@ -53,7 +55,7 @@ command -v cd-hit >/dev/null || { echo "cd-hit not on PATH -- conda activate pan
 
 out_py="$build/out/$name/py"
 out_rs="$build/out/$name/rs"
-rm -rf "$out_py"; mkdir -p "$out_py"
+safe_rm_rf "$repo/tests" "$out_py"; mkdir -p "$out_py"
 
 echo "== reference ($ref) on $name, $(wc -l < "$input") genomes =="
 ( cd "$ref" && PYTHONHASHSEED=0 python -m panaroo -i "$input" -o "$out_py" \
@@ -63,8 +65,8 @@ if [[ "$python_only" == 1 ]]; then
   echo; echo "reference output: $out_py"; exit 0
 fi
 
-rm -rf "$out_rs"; mkdir -p "$out_rs"
-cargo build --release --features cli --manifest-path "$repo/Cargo.toml" >/dev/null 2>&1
+safe_rm_rf "$repo/tests" "$out_rs"; mkdir -p "$out_rs"
+cargo build --release --features cli --manifest-path "$repo/Cargo.toml" >/dev/null
 echo; echo "== panaroo-rs on $name =="
 # panaroo-rs takes the file list directly, as upstream does when given many -i arguments
 mapfile -t infiles < "$input"

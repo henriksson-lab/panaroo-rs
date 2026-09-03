@@ -290,7 +290,11 @@ pub fn collapse_families(
             Some(ids) => g
                 .nodes()
                 .into_iter()
-                .filter(|&n| !g.node(n).members.intersection(ids).is_empty())
+                // `!a.intersection(b).is_empty()` materialised a whole IntBitSet to answer
+                // a boolean. `isdisjoint` scans the same `min(len)` word range with the same
+                // `&`, so it is the identical predicate -- but it short-circuits on the first
+                // overlapping word and allocates nothing.
+                .filter(|&n| !g.node(n).members.isdisjoint(ids))
                 .collect(),
         };
 

@@ -12,6 +12,8 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
+# shellcheck source=tests/lib/safe_rm.sh
+source "$repo/tests/lib/safe_rm.sh"
 build="$repo/tests/parity/build"
 dataset="${1:-smoke}"
 input="$build/data/$dataset/input.txt"
@@ -21,7 +23,7 @@ threads="${THREADS:-8}"
 command -v cd-hit >/dev/null || { echo "cd-hit not on PATH -- conda activate panaroo-parity" >&2; exit 1; }
 
 out="$build/out/determinism/$dataset"
-rm -rf "$out"; mkdir -p "$out"
+safe_rm_rf "$repo/tests" "$out"; mkdir -p "$out"
 for s in 0 1 2; do
   echo "== seed $s =="
   ( cd "$build/reference" && PYTHONHASHSEED=$s python -m panaroo \
