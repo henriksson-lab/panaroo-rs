@@ -52,16 +52,35 @@ pub fn argv_from_command(cmd: &str) -> Vec<String> {
 /// failure mode rather than silently producing an empty alignment.
 pub fn run_mafft(cmd: &str) -> Vec<u8> {
     let argv = argv_from_command(cmd);
+    run_mafft_argv(&argv)
+}
+
+/// Run an already-tokenized MAFFT argv in-process, returning stdout bytes.
+pub fn run_mafft_argv(argv: &[String]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
+    run_mafft_argv_to_writer(argv, &mut out);
+    out
+}
+
+/// Run an already-tokenized MAFFT argv in-process, writing stdout to `out`.
+pub fn run_mafft_argv_to_writer(argv: &[String], out: &mut dyn std::io::Write) {
     // Silence MAFFT's progress lines (`Alignment: N columns`, strategy banners). The
     // subprocess path captured and discarded them via `popen_communicate`; in-process they
     // would otherwise reach the user's terminal ~5,100 times from 20 threads. Errors are
     // unaffected -- they come back through `MafftError`, never through the sink.
     let quiet = mafft_rs::progress::SilentProgress;
-    match mafft_rs::run_from_with_progress(&argv, &mut out, &quiet) {
-        Ok(()) => out,
+    match mafft_rs::run_from_with_progress(argv, out, &quiet) {
+        Ok(()) => {}
         Err(e) => panic!("RuntimeError: mafft failed ({}): {}", e.code(), e.message()),
     }
+}
+
+/// Run an already-tokenized MAFFT argv in-process, streaming stdout straight to `path`.
+pub fn run_mafft_argv_to_file(argv: &[String], path: &str) {
+    let file =
+        std::fs::File::create(path).unwrap_or_else(|e| panic!("could not create {path}: {e}"));
+    let mut writer = std::io::BufWriter::new(file);
+    run_mafft_argv_to_writer(argv, &mut writer);
 }
 
 #[cfg(test)]

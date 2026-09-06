@@ -53,13 +53,20 @@ translations of each:
 cargo install --git https://github.com/henriksson-lab/panaroo-rs --features cli,cdhit-embedded,mafft-embedded
 ```
 
-These two features are **source-build only.** Neither `cdhit-rs` nor the `rust-MAFFT` fork is
-on crates.io, and cargo resolves git dependencies from crates.io at publish time, so a
-`cargo install panaroo-rs` from the registry cannot enable them (and, until that changes,
-the crate itself cannot be packaged for the registry at all — see `PORTING_PLAN.md` §11 K).
+**This crate is not published to crates.io, and neither are the embedded backends** — by
+decision, not oversight. Each is depended on wherever its latest code lives: cd-hit from
+GitHub, MAFFT from a local checkout of the fork until its latest commit is pushed. So
+`mafft-embedded` currently builds only on a machine with that checkout, which is also why
+CI enables `cli,cdhit-embedded` and not `mafft-embedded`.
 
 Both are verified byte-identical against the real tools on the parity suite — cd-hit on all
-13 output files at `-t 1`, MAFFT on all 5,096 per-gene alignments — and both integrations
+13 output files at `-t 1`, MAFFT on all 5,096 per-gene alignments of this dataset. **That
+MAFFT figure does not yet generalise:** the parity work found a pre-existing gap-penalty
+scaling bug in rust-MAFFT's DNA pairwise phase (L-INS-i, the mode `--auto` selects for
+small clusters) that this dataset's conserved, indel-poor clusters happen not to trigger,
+while realistic clusters with indels do (~50%). A fix is in progress in the fork; until it
+lands and is re-verified, treat `mafft-embedded` as verified on this data, not in general.
+Both integrations
 drive the translated tool with the **same argv** the subprocess path would have built, so
 flag semantics have exactly one definition. Note that `cdhit-embedded` pulls a GPL-2.0
 dependency into the build.
@@ -89,11 +96,11 @@ See `tests/parity/README.md` for the rest of the suite.
 Same input, same output — all 13 output files byte-identical — on 4 *M. tuberculosis*
 genomes (`--clean-mode strict`, 20 threads):
 
-| | Python Panaroo | panaroo-rs | ratio |
+| | Python Panaroo | panaroo-rs | panaroo-rs `+cdhit-embedded` |
 |---|---|---|---|
-| wall clock | 66.6 s | 43.2 s | **1.5×** faster |
-| CPU time (user + sys) | 621 s | 552 s | 1.1× less |
-| peak memory (tree PSS) | 1604 MB | 462 MB | **3.5×** less |
+| wall clock | 64.0 s | 42.1 s (**1.5×**) | 44.0 s (1.5×) |
+| CPU time (user + sys) | 612 s | 546 s (1.1×) | 530 s (1.2×) |
+| peak memory (tree PSS) | 1691 MB | 462 MB (**3.7×**) | **256 MB** (**6.6×**) |
 
 Three caveats, because a benchmark table without them is worse than none:
 
@@ -101,6 +108,12 @@ Three caveats, because a benchmark table without them is worse than none:
   Wall-clock time is the number most contaminated by that; treat 1.5× as a rough
   magnitude, not a measurement. Re-run with `tests/bench/run.sh ci -n 5 -T 20` on a quiet
   box for figures with a measured spread.
+- **Almost all of this run is cd-hit, not our code.** `perf` puts **99.2%** of CPU inside
+  the `cd-hit`/`cd-hit-est` subprocesses and **0.85%** in everything this crate wrote. So the
+  wall-clock ratio is mostly a statement about process overhead and scheduling, and no
+  amount of optimisation here can move it. The third column runs a Rust cd-hit in-process
+  instead: same wall time, but **peak memory drops 462 → 256 MB** because it no longer forks
+  a 20-thread C process holding its own word tables.
 - **The CPU-time ratio (1.1×) is largely an artefact and should not be read as "the two
   implementations do about the same amount of work".** Both sides invoke the same external
   `cd-hit` binary 12 times per run with identical flags, and that binary is 60–75% of the

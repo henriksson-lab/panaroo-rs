@@ -44,6 +44,24 @@ use std::sync::Mutex;
 /// one thread, but that is a property of the caller, not of this function, so serialise.
 static CDHIT_LOCK: Mutex<()> = Mutex::new(());
 
+struct QuietOutputGuard {
+    previous: bool,
+}
+
+impl QuietOutputGuard {
+    fn new(quiet: bool) -> Self {
+        let previous = quiet_output();
+        set_quiet_output(quiet);
+        Self { previous }
+    }
+}
+
+impl Drop for QuietOutputGuard {
+    fn drop(&mut self) {
+        set_quiet_output(self.previous);
+    }
+}
+
 /// Turn a shell command string into argv, dropping the output redirection.
 ///
 /// `> /dev/null` is a shell construct; in-process there is no shell to interpret it, and
@@ -72,8 +90,9 @@ fn num_procs() -> i32 {
 ///
 /// Mirrors that `main` step for step. The only omissions are its `println!` banners and the
 /// `print_usage` exit paths, which are process-level behaviour rather than clustering.
-pub fn run_cd_hit_main(argv: &[String]) {
+pub fn run_cd_hit_main(argv: &[String], quiet: bool) {
     let _guard = CDHIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _quiet_guard = QuietOutputGuard::new(quiet);
 
     let mut options = Options::default();
     let mut seq_db = SequenceDB::default();
@@ -94,7 +113,7 @@ pub fn run_cd_hit_main(argv: &[String]) {
 
     seq_db.read(&db_in, &options);
     seq_db.sort_divide(&mut options, true, &alphabet);
-    seq_db.do_clustering(&options.clone(), &mat, &naa_tab, &[]);
+    seq_db.do_clustering(&options, &mat, &naa_tab, &[]);
 
     seq_db.write_clusters(&db_in, &db_out, &options);
     seq_db.write_extra_1d(&options);
@@ -106,8 +125,9 @@ pub fn run_cd_hit_main(argv: &[String]) {
 /// defaults set *before* parsing, `set_options(.., est = true)`, `MAX_UAA_EST`, and the
 /// complementary word index when `-r` is non-zero. Panaroo never uses paired-end mode, but
 /// the branch is kept so this stays a faithful mirror of the front-end.
-pub fn run_cd_hit_est_main(argv: &[String]) {
+pub fn run_cd_hit_est_main(argv: &[String], quiet: bool) {
     let _guard = CDHIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _quiet_guard = QuietOutputGuard::new(quiet);
 
     let mut options = Options::default();
     let mut seq_db = SequenceDB::default();
@@ -147,7 +167,7 @@ pub fn run_cd_hit_est_main(argv: &[String]) {
         seq_db.read(&db_in, &options);
     }
     seq_db.sort_divide(&mut options, true, &alphabet);
-    seq_db.do_clustering(&options.clone(), &mat, &naa_tab, &comp_aan_idx);
+    seq_db.do_clustering(&options, &mat, &naa_tab, &comp_aan_idx);
 
     if options.pe_mode != 0 {
         seq_db.write_clusters_pe(&db_in, &db_in_pe, &db_out, &db_out_pe, &options);

@@ -11,6 +11,7 @@ fn main() {
     let reps: usize = a.get(2).map(|s| s.parse().unwrap()).unwrap_or(64);
     let cmd = format!("mafft --auto --adjustdirection --thread 1 --nuc {path}");
 
+    let mut baseline = None;
     for workers in [1usize, 2, 4, 8, 20] {
         let jobs: Vec<usize> = (0..reps).collect();
         let t = std::time::Instant::now();
@@ -18,10 +19,11 @@ fn main() {
             panaroo::mafft_embedded::run_mafft(&cmd).len()
         });
         let el = t.elapsed().as_secs_f64();
+        let base = *baseline.get_or_insert(el);
         println!(
             "  workers={workers:<3} {reps} alignments in {el:6.2} s  ({:6.1} aln/s, speedup {:.2}x)",
             reps as f64 / el,
-            0.0
+            base / el
         );
     }
 }

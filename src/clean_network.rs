@@ -107,58 +107,141 @@ pub fn single_linkage(
     neighbours: &[usize],
 ) -> Vec<Vec<usize>> {
     let mut index: Vec<usize> = Vec::new();
-    let mut neigh_array: Vec<usize> = Vec::new();
+    let mut neigh_offsets = Vec::with_capacity(neighbours.len() + 1);
+    neigh_offsets.push(0);
     for &neigh in neighbours {
         for sid in &g.node(neigh).centroid {
             index.push(centroid_to_index[sid]);
-            neigh_array.push(neigh);
         }
+        neigh_offsets.push(index.len());
     }
 
-    let sub = distances_bwtn_centroids.submatrix(&index);
-    let (_n_components, mut labels) = crate::support::sparse::connected_components(&sub, false);
+    let mut labels = undirected_component_labels_for_index(distances_bwtn_centroids, &index);
 
-    for &neigh in neighbours {
+    let mut label_sets: Vec<std::collections::BTreeSet<i64>> =
+        vec![std::collections::BTreeSet::new(); neighbours.len()];
+    for (neigh_i, window) in neigh_offsets.windows(2).enumerate() {
+        for &label in &labels[window[0]..window[1]] {
+            label_sets[neigh_i].insert(label);
+        }
+    }
+    let max_label = labels.iter().copied().max().unwrap_or(-1);
+    let mut label_merges = DisjointSet::new((max_label + 1) as usize);
+    for labels_for_neigh in &label_sets {
         // Tier D: `sorted(set(labels[neigh_array == neigh]))`, so l[0] is the smallest
         // label rather than an arbitrary one. Every other label in the group is rewritten
         // to it, which is what merges components that share a node.
-        let mut l: Vec<i64> = labels
-            .iter()
-            .zip(neigh_array.iter())
-            .filter(|(_, &n)| n == neigh)
-            .map(|(&lab, _)| lab)
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        if l.len() > 1 {
-            let target = l[0];
-            for &i in &l[1..] {
-                for lab in labels.iter_mut() {
-                    if *lab == i {
-                        *lab = target;
-                    }
+        if labels_for_neigh.len() > 1 {
+            let mut labels_for_neigh = labels_for_neigh.iter().copied();
+            if let Some(target) = labels_for_neigh.next() {
+                for i in labels_for_neigh {
+                    label_merges.union_min(target as usize, i as usize);
                 }
             }
         }
-        l.clear();
+    }
+    for label in &mut labels {
+        *label = label_merges.find(*label as usize) as i64;
     }
 
     // `np.unique(labels)` is sorted, so cluster order follows label value.
-    let uniq = crate::support::npmath::np_unique_i64(&labels);
-    uniq.into_iter()
-        .map(|i| {
-            let mut v: Vec<usize> = labels
-                .iter()
-                .zip(neigh_array.iter())
-                .filter(|(&lab, _)| lab == i)
-                .map(|(_, &n)| n)
-                .collect();
+    let mut groups: std::collections::BTreeMap<i64, Vec<usize>> = std::collections::BTreeMap::new();
+    for (neigh_i, window) in neigh_offsets.windows(2).enumerate() {
+        let neigh = neighbours[neigh_i];
+        for &label in &labels[window[0]..window[1]] {
+            groups.entry(label).or_default().push(neigh);
+        }
+    }
+    groups
+        .into_values()
+        .map(|mut v| {
             // `del_dups` from isvalid (the later import wins in clean_network.py), which
             // dedups in place preserving first-occurrence order.
             crate::isvalid::del_dups(&mut v);
             v
         })
         .collect()
+}
+
+/// Equivalent to `connected_components(distances[index][:, index], directed=False)[1]`.
+///
+/// `single_linkage` calls this for every candidate node. Building the temporary CSR
+/// submatrix is observable only through SciPy's component label numbering, which is the
+/// component order by the smallest local vertex. A union-find over the selected positions
+/// preserves that numbering while avoiding the per-call sparse allocation and transpose.
+fn undirected_component_labels_for_index(distances: &CsrMatrix, index: &[usize]) -> Vec<i64> {
+    let n = index.len();
+    let mut col_pos: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (p, &c) in index.iter().enumerate() {
+        col_pos.entry(c).or_default().push(p);
+    }
+
+    let mut components = DisjointSet::new(n);
+    for (row_pos, &row) in index.iter().enumerate() {
+        for k in distances.indptr[row]..distances.indptr[row + 1] {
+            if distances.data[k] == 0 {
+                continue;
+            }
+            if let Some(positions) = col_pos.get(&distances.indices[k]) {
+                for &col in positions {
+                    components.union_min(row_pos, col);
+                }
+            }
+        }
+    }
+
+    let mut root_to_label: HashMap<usize, i64> = HashMap::new();
+    let mut next_label = 0i64;
+    let mut labels = Vec::with_capacity(n);
+    for v in 0..n {
+        let root = components.find(v);
+        let label = *root_to_label.entry(root).or_insert_with(|| {
+            let label = next_label;
+            next_label += 1;
+            label
+        });
+        labels.push(label);
+    }
+    labels
+}
+
+#[derive(Debug, Clone)]
+struct DisjointSet {
+    parent: Vec<usize>,
+}
+
+impl DisjointSet {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+        }
+    }
+
+    fn find(&mut self, mut x: usize) -> usize {
+        let mut root = x;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        while self.parent[x] != x {
+            let parent = self.parent[x];
+            self.parent[x] = root;
+            x = parent;
+        }
+        root
+    }
+
+    fn union_min(&mut self, a: usize, b: usize) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra == rb {
+            return;
+        }
+        if ra < rb {
+            self.parent[rb] = ra;
+        } else {
+            self.parent[ra] = rb;
+        }
+    }
 }
 
 /// `clean_network.py::collapse_families`
@@ -571,12 +654,13 @@ pub fn collapse_paralogs(
         }
 
         // `max(..., key=len)` returns the FIRST maximum -- fold with a strict `>`.
-        let mut ref_paralogs: Vec<(usize, usize)> = Vec::new();
+        let mut ref_paralogs: Option<&Vec<(usize, usize)>> = None;
         for v in member_paralogs.values() {
-            if v.len() > ref_paralogs.len() {
-                ref_paralogs = v.clone();
+            if ref_paralogs.is_none_or(|best| v.len() > best.len()) {
+                ref_paralogs = Some(v);
             }
         }
+        let ref_paralogs = ref_paralogs.expect("member_paralogs is not empty");
 
         // for each paralog find its closest reference paralog
         let mut cluster_dict: PyDict<usize, BTreeSet<usize>> = PyDict::new();
@@ -586,7 +670,7 @@ pub fn collapse_paralogs(
             cluster_mems.insert(c, BTreeSet::from([r.1]));
         }
 
-        for para in centroid_contexts.get(&centroid).unwrap().clone() {
+        for para in centroid_contexts.get(&centroid).unwrap() {
             let mut d_max = usize::MAX;
             let mut best_cluster: Option<usize> = None;
 
@@ -645,14 +729,13 @@ pub fn collapse_paralogs(
         }
 
         // merge
-        for cluster in cluster_dict.keys().copied().collect::<Vec<_>>() {
-            let members = cluster_dict.get(&cluster).unwrap().clone();
+        for (_cluster, members) in cluster_dict.items() {
             if members.len() < 2 {
                 continue;
             }
             node_count += 1;
             // Tier D: sorted(cluster_dict[cluster]) -- a BTreeSet is already sorted.
-            let nodes: Vec<usize> = members.into_iter().collect();
+            let nodes: Vec<usize> = members.iter().copied().collect();
             merge_node_cluster(g, &nodes, node_count, true, true);
         }
     }
@@ -674,7 +757,7 @@ pub fn merge_paralogs(g: &mut Graph) {
     let mut paralog_centroids: PyDict<String, Vec<usize>> = PyDict::new();
     for node in g.nodes() {
         if g.node(node).paralog {
-            for centroid in g.node(node).centroid.clone() {
+            for centroid in &g.node(node).centroid {
                 if !paralog_centroids.contains_key(&centroid) {
                     paralog_centroids.insert(centroid.clone(), Vec::new());
                 }
@@ -774,4 +857,23 @@ pub fn identify_possible_highly_variable(
     _size_diff_threshold: f64,
 ) {
     panic!("noimpl: clean_network::identify_possible_highly_variable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn coo(data: Vec<i64>, r: Vec<usize>, c: Vec<usize>, n: usize) -> CsrMatrix {
+        CsrMatrix::from_coo(data, r, c, (n, n))
+    }
+
+    #[test]
+    fn direct_component_labels_match_sparse_slice() {
+        let m = coo(vec![1, 1, 1, 1], vec![0, 1, 4, 3], vec![3, 2, 0, 1], 5);
+        for index in [vec![3, 1, 2], vec![4, 0, 3, 1, 2], vec![3, 1, 2, 1]] {
+            let sub = m.submatrix(&index);
+            let (_, expected) = crate::support::sparse::connected_components(&sub, false);
+            assert_eq!(undirected_component_labels_for_index(&m, &index), expected);
+        }
+    }
 }

@@ -2,6 +2,7 @@
 
 use crate::support::graph::Graph;
 use std::collections::HashMap;
+use std::io::Write;
 
 /// `(length, has_internal_stop, is_valid)` — the `ids_len_stop` values built in
 /// `__main__::main` and threaded through here.
@@ -19,6 +20,131 @@ type GeneAlignment = (
     f64,
 );
 
+fn push_gaps(seq: &mut String, n: usize) {
+    seq.extend(std::iter::repeat('-').take(n));
+}
+
+fn write_delimited_cells<'a, W, I>(writer: &mut W, cells: I, sep: char)
+where
+    W: Write,
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut first = true;
+    for cell in cells {
+        if first {
+            first = false;
+        } else {
+            write!(writer, "{sep}").unwrap();
+        }
+        write!(writer, "{cell}").unwrap();
+    }
+    writeln!(writer).unwrap();
+}
+
+fn seq_sample_key(seq_id: &str) -> &str {
+    let last = seq_id.rfind('_').unwrap_or(seq_id.len());
+    let prefix = &seq_id[..last];
+    match prefix.rfind('_') {
+        Some(second_last) => &seq_id[..second_last],
+        None => "",
+    }
+}
+
+fn roary_gene_name(annotation: &str) -> String {
+    let mut out = String::new();
+    let mut first = true;
+    for gene in annotation
+        .trim()
+        .trim_matches(';')
+        .split(';')
+        .filter(|gn| !gn.is_empty())
+    {
+        if first {
+            first = false;
+        } else {
+            out.push_str("~~~");
+        }
+        out.extend(
+            gene.chars()
+                .filter(|e| e.is_alphanumeric() || *e == '_' || *e == '~'),
+        );
+    }
+    out
+}
+
+fn length_stats_and_first_mode(
+    lengths: &[usize],
+    counts: &mut Vec<(usize, usize)>,
+) -> (usize, usize, f64, usize) {
+    counts.clear();
+    let mut min = lengths[0];
+    let mut max = lengths[0];
+    let mut sum = 0.0;
+    for &length in lengths {
+        min = min.min(length);
+        max = max.max(length);
+        sum += length as f64;
+        match counts.iter_mut().find(|(value, _)| *value == length) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((length, 1)),
+        }
+    }
+    let mut mode = counts[0].0;
+    let mut best_count = counts[0].1;
+    for &(length, count) in &counts[1..] {
+        if count > best_count {
+            mode = length;
+            best_count = count;
+        }
+    }
+    (min, max, sum / lengths.len() as f64, mode)
+}
+
+fn write_core_alignment_records(
+    path: &str,
+    isolates: &std::collections::BTreeSet<String>,
+    gene_alignments: &[GeneAlignment],
+    seq_capacity: usize,
+    hc_threshold: Option<f64>,
+) -> usize {
+    use crate::support::seqio::write_fasta_record;
+
+    let file =
+        std::fs::File::create(path).unwrap_or_else(|e| panic!("could not create {path}: {e}"));
+    let mut writer = std::io::BufWriter::new(file);
+    let mut keep_count = 0usize;
+    match hc_threshold {
+        None => {
+            for iso in isolates {
+                let mut seq = String::with_capacity(seq_capacity);
+                for gene in gene_alignments {
+                    match gene.1.get(iso) {
+                        Some((_, s)) => seq.push_str(s),
+                        None => push_gaps(&mut seq, gene.2),
+                    }
+                }
+                write_fasta_record(iso, &seq, &mut writer);
+            }
+        }
+        Some(threshold) => {
+            for iso in isolates {
+                let mut seq = String::with_capacity(seq_capacity);
+                for gene in gene_alignments {
+                    if gene.3 <= threshold {
+                        keep_count += 1;
+                        match gene.1.get(iso) {
+                            Some((_, s)) => seq.push_str(s),
+                            None => push_gaps(&mut seq, gene.2),
+                        }
+                    }
+                }
+                write_fasta_record(iso, &seq, &mut writer);
+            }
+        }
+    }
+    keep_count
+}
+
 /// `generate_output.py::generate_roary_gene_presence_absence`
 ///
 /// Writes `gene_presence_absence_roary.csv`, `gene_presence_absence.csv` and
@@ -33,11 +159,8 @@ type GeneAlignment = (
 ///  - `for seq in G.nodes[node]["seqIDs"]` iterates a Python `set[String]`; the first
 ///    element seen claims the primary slot in each cell and the rest are appended after
 ///    `;` in iteration order (§6.1).
-///  - `max(lengths, key=lengths.count)` returns the **first** modal value (§6.4), and
-///    `np.mean(lengths)` needs numpy's pairwise summation and Python's float repr
-///    (§6.2, §6.3).
-///
-/// PORTING_PLAN.md §9 item 4: `key=lengths.count` is O(k²) per node. Stays for now.
+///  - `max(lengths, key=lengths.count)` returns the **first** modal value (§6.4);
+///  - `np.mean(lengths)` needs Python-compatible float formatting (§6.2, §6.3).
 pub fn generate_roary_gene_presence_absence(
     g: &mut Graph,
     mems_to_isolates: &crate::support::pydict::PyDict<usize, String>,
@@ -45,10 +168,8 @@ pub fn generate_roary_gene_presence_absence(
     ids_len_stop: &HashMap<String, IdLenStop>,
     output_dir: &str,
 ) {
-    use crate::support::npmath::{np_max_i64, np_mean_f64, np_min_i64};
     use crate::support::pyfmt::py_str_f64;
     use std::collections::HashMap as Map;
-    use std::io::Write;
 
     // arange isolates
     let mut isolates: Vec<String> = Vec::new();
@@ -68,7 +189,7 @@ pub fn generate_roary_gene_presence_absence(
         std::fs::File::create(format!("{output_dir}gene_presence_absence.Rtab")).unwrap(),
     );
 
-    let mut header: Vec<String> = [
+    let header = [
         "Gene",
         "Non-unique Gene name",
         "Annotation",
@@ -83,32 +204,28 @@ pub fn generate_roary_gene_presence_absence(
         "Min group size nuc",
         "Max group size nuc",
         "Avg group size nuc",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    header.extend(isolates.iter().cloned());
-    writeln!(roary, "{}", header.join(",")).unwrap();
-    writeln!(
-        csv,
-        "{}",
+    ];
+    write_delimited_cells(
+        &mut roary,
+        header
+            .iter()
+            .copied()
+            .chain(isolates.iter().map(String::as_str)),
+        ',',
+    );
+    write_delimited_cells(
+        &mut csv,
         header[..3]
             .iter()
-            .chain(isolates.iter())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-    .unwrap();
-    writeln!(
-        rtab,
-        "{}",
-        std::iter::once("Gene".to_string())
-            .chain(isolates.iter().cloned())
-            .collect::<Vec<_>>()
-            .join("\t")
-    )
-    .unwrap();
+            .copied()
+            .chain(isolates.iter().map(String::as_str)),
+        ',',
+    );
+    write_delimited_cells(
+        &mut rtab,
+        std::iter::once("Gene").chain(isolates.iter().map(String::as_str)),
+        '\t',
+    );
 
     // Iterate through components writing out to file
     let mut used_gene_names: std::collections::HashSet<String> =
@@ -117,9 +234,9 @@ pub fn generate_roary_gene_presence_absence(
     let mut frag = 0usize;
     let mut entry_list: Vec<Vec<String>> = Vec::new();
     let mut entry_ext_list: Vec<Vec<String>> = Vec::new();
-    let mut pres_abs_list: Vec<Vec<String>> = Vec::new();
     let mut entry_sizes: Vec<(usize, usize)> = Vec::new();
     let mut entry_count = 0usize;
+    let mut length_counts: Vec<(usize, usize)> = Vec::new();
 
     for component in crate::support::graph::connected_components(g) {
         frag += 1;
@@ -127,32 +244,11 @@ pub fn generate_roary_gene_presence_absence(
         // Tier D: sorted(component)
         for node in component {
             count += 1;
-            // `max(lengths, key=lengths.count)` returns the FIRST modal value.
-            // PORTING_PLAN.md §9 item 4: O(k^2). Stays.
-            let lengths = g.node(node).lengths.clone();
-            let mut len_mode = lengths[0];
-            let mut best_c = lengths.iter().filter(|&&x| x == lengths[0]).count();
-            for &l in &lengths[1..] {
-                let c = lengths.iter().filter(|&&x| x == l).count();
-                if c > best_c {
-                    best_c = c;
-                    len_mode = l;
-                }
-            }
+            let lengths = &g.node(node).lengths;
+            let (length_min, length_max, length_mean, len_mode) =
+                length_stats_and_first_mode(lengths, &mut length_counts);
 
-            let name: String = g
-                .node(node)
-                .annotation
-                .trim()
-                .trim_matches(';')
-                .split(';')
-                .filter(|gn| !gn.is_empty())
-                .collect::<Vec<_>>()
-                .join("~~~");
-            let name: String = name
-                .chars()
-                .filter(|e| e.is_alphanumeric() || *e == '_' || *e == '~')
-                .collect();
+            let name = roary_gene_name(&g.node(node).annotation);
 
             let mut entry: Vec<String> = Vec::new();
             if !used_gene_names.contains(&name.to_lowercase()) {
@@ -166,7 +262,7 @@ pub fn generate_roary_gene_presence_absence(
                 unique_id_count += 1;
             }
 
-            let nd = g.node(node).clone();
+            let nd = g.node(node);
             entry.push(nd.annotation.clone());
             entry.push(nd.description.clone());
             entry.push(nd.size.to_string());
@@ -177,20 +273,17 @@ pub fn generate_roary_gene_presence_absence(
             entry.push(String::new());
             entry.push(String::new());
             entry.push(String::new());
-            let li: Vec<i64> = nd.lengths.iter().map(|&x| x as i64).collect();
-            let lf: Vec<f64> = nd.lengths.iter().map(|&x| x as f64).collect();
-            entry.push(np_min_i64(&li).to_string());
-            entry.push(np_max_i64(&li).to_string());
-            entry.push(py_str_f64(np_mean_f64(&lf)));
+            entry.push(length_min.to_string());
+            entry.push(length_max.to_string());
+            entry.push(py_str_f64(length_mean));
 
             let mut pres_abs = vec![String::new(); isolates.len()];
             let mut pres_abs_ext = vec![String::new(); isolates.len()];
             let mut entry_size = 0usize;
             // Tier D: sorted(seqIDs) -- a BTreeSet is already sorted
             for seq in nd.seq_ids.iter() {
-                let parts: Vec<&str> = seq.split('_').collect();
-                let sample_key = parts[..parts.len() - 2].join("_");
-                let sample_id = mems_to_index[&sample_key];
+                let sample_key = seq_sample_key(seq);
+                let sample_id = *mems_to_index.get(sample_key).unwrap();
                 let val = orig_ids.get(seq).cloned().unwrap_or_else(|| seq.clone());
                 if pres_abs[sample_id].is_empty() {
                     pres_abs[sample_id] = val.clone();
@@ -219,7 +312,6 @@ pub fn generate_roary_gene_presence_absence(
             entry.extend(pres_abs.iter().cloned());
             entry_list.push(entry);
             entry_ext_list.push(ext);
-            pres_abs_list.push(pres_abs);
             entry_sizes.push((entry_size, entry_count));
             entry_count += 1;
         }
@@ -228,14 +320,17 @@ pub fn generate_roary_gene_presence_absence(
     // sort so that the most common genes are first (as in roary)
     entry_sizes.sort_by(|a, b| b.cmp(a));
     for (_s, i) in entry_sizes {
-        writeln!(roary, "{}", entry_list[i].join(",")).unwrap();
-        writeln!(csv, "{}", entry_ext_list[i].join(",")).unwrap();
+        write_delimited_cells(&mut roary, entry_list[i].iter().map(String::as_str), ',');
+        write_delimited_cells(&mut csv, entry_ext_list[i].iter().map(String::as_str), ',');
         write!(rtab, "{}\t", entry_list[i][0]).unwrap();
-        let calls: Vec<&str> = pres_abs_list[i]
-            .iter()
-            .map(|e| if e.is_empty() { "0" } else { "1" })
-            .collect();
-        writeln!(rtab, "{}", calls.join("\t")).unwrap();
+        for (j, entry) in entry_list[i][14..].iter().enumerate() {
+            if j != 0 {
+                write!(rtab, "\t").unwrap();
+            }
+            let call = if entry.is_empty() { "0" } else { "1" };
+            write!(rtab, "{call}").unwrap();
+        }
+        writeln!(rtab).unwrap();
     }
 }
 
@@ -338,40 +433,28 @@ pub fn generate_common_struct_presence_absence(
         }
     }
 
-    let header: Vec<String> = struct_variants
-        .keys()
-        .map(|v| {
-            format!(
-                "{}-{}-{}",
-                g.node(v.1).name.as_deref().unwrap_or(""),
-                g.node(v.0).name.as_deref().unwrap_or(""),
-                g.node(v.2).name.as_deref().unwrap_or("")
-            )
-        })
-        .collect();
-
     let mut out = std::io::BufWriter::new(
         std::fs::File::create(format!("{output_dir}struct_presence_absence.Rtab")).unwrap(),
     );
-    writeln!(
-        out,
-        "{}",
-        std::iter::once("Gene".to_string())
-            .chain(isolates.iter().cloned())
-            .collect::<Vec<_>>()
-            .join("\t")
-    )
-    .unwrap();
-    for (h, (_variant, in_both)) in header.iter().zip(struct_variants.items()) {
-        let mut calls = vec![h.clone()];
+    write!(out, "Gene").unwrap();
+    for iso in &isolates {
+        write!(out, "\t{iso}").unwrap();
+    }
+    writeln!(out).unwrap();
+    for (variant, in_both) in struct_variants.items() {
+        write!(
+            out,
+            "{}-{}-{}",
+            g.node(variant.1).name.as_deref().unwrap_or(""),
+            g.node(variant.0).name.as_deref().unwrap_or(""),
+            g.node(variant.2).name.as_deref().unwrap_or("")
+        )
+        .unwrap();
         for &member in &members {
-            calls.push(if in_both.contains(member) {
-                "1".into()
-            } else {
-                "0".into()
-            });
+            let call = if in_both.contains(member) { "1" } else { "0" };
+            write!(out, "\t{call}").unwrap();
         }
-        writeln!(out, "{}", calls.join("\t")).unwrap();
+        writeln!(out).unwrap();
     }
 }
 
@@ -410,13 +493,14 @@ pub fn generate_pan_genome_alignment(
         // transform to dicts for fast lookup
         let proteins_dic = fasta_by_id(&format!("{output_dir}combined_protein_CDS.fasta"));
         let nucleotides_dic = fasta_by_id(&format!("{output_dir}combined_DNA_CDS.fasta"));
+        let clean_isolates: Vec<String> = isolates.iter().map(|s| s.replace(';', "")).collect();
 
         // File output must stay single threaded (see the upstream comment)
         let mut output_files = Vec::new();
         for gene in &protein_pending {
             output_files.push(output_dna_and_protein(
                 g.node(*gene),
-                isolates,
+                &clean_isolates,
                 temp_dir,
                 output_dir,
                 &proteins_dic,
@@ -443,7 +527,7 @@ pub fn generate_pan_genome_alignment(
             Some(total_gene_count),
         );
         multi_align_sequences(
-            &commands,
+            commands,
             &format!("{output_dir}aligned_protein_sequences/"),
             threads,
             aligner,
@@ -517,7 +601,7 @@ pub fn generate_pan_genome_alignment(
             .map(|f| get_alignment_commands(f, output_dir, aligner, threads))
             .collect();
         multi_align_sequences(
-            &commands,
+            commands,
             &format!("{output_dir}aligned_gene_sequences/"),
             threads,
             aligner,
@@ -658,7 +742,6 @@ pub fn concatenate_core_genome_alignments(
     hc_threshold: Option<f64>,
 ) {
     use crate::support::pydict::PyDict;
-    use crate::support::seqio::{write_fasta_file, SeqRecord};
     use std::collections::BTreeSet;
     use std::io::Write;
 
@@ -722,22 +805,13 @@ pub fn concatenate_core_genome_alignments(
         gene_alignments.push((gene_name, gene_dict, gene_length, hc));
     }
 
-    // Combine them
-    let mut isolate_aln: Vec<SeqRecord> = Vec::new();
-    for iso in &isolates {
-        let mut seq = String::new();
-        for gene in &gene_alignments {
-            match gene.1.get(iso) {
-                Some((_, s)) => seq.push_str(s),
-                None => seq.push_str(&"-".repeat(gene.2)),
-            }
-        }
-        isolate_aln.push(SeqRecord::new(seq, iso.clone(), String::new()));
-    }
-
-    write_fasta_file(
-        &isolate_aln,
+    let total_alignment_len: usize = gene_alignments.iter().map(|g| g.2).sum();
+    write_core_alignment_records(
         &format!("{output_dir}core_gene_alignment.aln"),
+        &isolates,
+        &gene_alignments,
+        total_alignment_len,
+        None,
     );
     let header_list: Vec<(String, usize)> =
         gene_alignments.iter().map(|g| (g.0.clone(), g.2)).collect();
@@ -762,22 +836,6 @@ pub fn concatenate_core_genome_alignments(
         }
     };
 
-    let mut isolate_aln: Vec<SeqRecord> = Vec::new();
-    let mut keep_count = 0usize;
-    for iso in &isolates {
-        let mut seq = String::new();
-        for gene in &gene_alignments {
-            if gene.3 <= hc_threshold {
-                keep_count += 1;
-                match gene.1.get(iso) {
-                    Some((_, s)) => seq.push_str(s),
-                    None => seq.push_str(&"-".repeat(gene.2)),
-                }
-            }
-        }
-        isolate_aln.push(SeqRecord::new(seq, iso.clone(), String::new()));
-    }
-
     {
         let f = std::fs::File::create(format!("{output_dir}alignment_entropy.csv")).unwrap();
         let mut w = std::io::BufWriter::new(f);
@@ -786,15 +844,19 @@ pub fn concatenate_core_genome_alignments(
         }
     }
 
-    write_fasta_file(
-        &isolate_aln,
-        &format!("{output_dir}core_gene_alignment_filtered.aln"),
-    );
     let filtered: Vec<(String, usize)> = gene_alignments
         .iter()
         .filter(|g| g.3 <= hc_threshold)
         .map(|g| (g.0.clone(), g.2))
         .collect();
+    let filtered_alignment_len: usize = filtered.iter().map(|g| g.1).sum();
+    let keep_count = write_core_alignment_records(
+        &format!("{output_dir}core_gene_alignment_filtered.aln"),
+        &isolates,
+        &gene_alignments,
+        filtered_alignment_len,
+        Some(hc_threshold),
+    );
     crate::generate_alignments::write_alignment_header(
         &filtered,
         output_dir,
@@ -882,12 +944,13 @@ pub fn generate_core_genome_alignment(
 
         let proteins_dic = fasta_by_id(&format!("{output_dir}combined_protein_CDS.fasta"));
         let nucleotides_dic = fasta_by_id(&format!("{output_dir}combined_DNA_CDS.fasta"));
+        let clean_isolates: Vec<String> = isolates.iter().map(|s| s.replace(';', "")).collect();
 
         let mut output_files = Vec::new();
         for gene in &protein_pending {
             output_files.push(output_dna_and_protein(
                 g.node(*gene),
-                isolates,
+                &clean_isolates,
                 temp_dir,
                 output_dir,
                 &proteins_dic,
@@ -908,7 +971,7 @@ pub fn generate_core_genome_alignment(
             Some(total_gene_count),
         );
         multi_align_sequences(
-            &commands,
+            commands,
             &format!("{output_dir}aligned_protein_sequences/"),
             threads,
             aligner,
@@ -974,7 +1037,7 @@ pub fn generate_core_genome_alignment(
             .map(|f| get_alignment_commands(f, output_dir, aligner, threads))
             .collect();
         multi_align_sequences(
-            &commands,
+            commands,
             &format!("{output_dir}aligned_gene_sequences/"),
             threads,
             aligner,
@@ -991,13 +1054,19 @@ pub fn generate_core_genome_alignment(
 pub fn generate_summary_stats(output_dir: &str) {
     let text = std::fs::read_to_string(format!("{output_dir}gene_presence_absence_roary.csv"))
         .expect("read gene_presence_absence_roary.csv");
-    let gpa: Vec<&str> = text.lines().skip(1).collect();
-    let no_samples = gpa[0].split(',').count() - 14;
+    let mut lines = text.lines();
+    let header = lines
+        .next()
+        .expect("gene_presence_absence_roary.csv header");
+    let no_samples = header.split(',').count() - 14;
 
     let (mut no_core, mut no_soft_core, mut no_shell, mut no_cloud, mut total) = (0, 0, 0, 0, 0);
-    for gene in &gpa {
-        let f: Vec<&str> = gene.split(',').collect();
-        let proportion_present = f[3].parse::<f64>().unwrap() / no_samples as f64 * 100.0;
+    for gene in lines {
+        let no_isolates = gene
+            .split(',')
+            .nth(3)
+            .expect("gene_presence_absence_roary.csv No. isolates column");
+        let proportion_present = no_isolates.parse::<f64>().unwrap() / no_samples as f64 * 100.0;
         if proportion_present >= 99.0 {
             no_core += 1;
         } else if proportion_present >= 95.0 {
@@ -1026,6 +1095,87 @@ mod tests {
     use super::*;
 
     // Expected values produced by the reference Python.
+
+    #[test]
+    fn seq_sample_key_matches_python_split_join_prefix() {
+        assert_eq!(seq_sample_key("sample_gene_1"), "sample");
+        assert_eq!(seq_sample_key("sample_name_gene_1"), "sample_name");
+        assert_eq!(seq_sample_key("_gene_1"), "");
+        assert_eq!(seq_sample_key("sample__1"), "sample");
+        assert_eq!(seq_sample_key("sample_1"), "");
+    }
+
+    #[test]
+    fn roary_gene_name_matches_join_then_filter() {
+        assert_eq!(
+            roary_gene_name(";;geneA;gene-B; ;x_y~z;;"),
+            "geneA~~~geneB~~~~~~x_y~z"
+        );
+        assert_eq!(
+            roary_gene_name(" ; weird/name ;two.words; "),
+            "weirdname~~~twowords"
+        );
+        assert_eq!(roary_gene_name(";;;"), "");
+    }
+
+    #[test]
+    fn length_stats_match_existing_numpy_helpers() {
+        use crate::support::npmath::{np_max_i64, np_mean_f64, np_min_i64};
+        use crate::support::pyfmt::py_str_f64;
+
+        let lengths = [3usize, 10, 4, 10, 5];
+        let mut counts = Vec::new();
+        let (min, max, mean, mode) = length_stats_and_first_mode(&lengths, &mut counts);
+        let li: Vec<i64> = lengths.iter().map(|&x| x as i64).collect();
+        let lf: Vec<f64> = lengths.iter().map(|&x| x as f64).collect();
+        assert_eq!(min.to_string(), np_min_i64(&li).to_string());
+        assert_eq!(max.to_string(), np_max_i64(&li).to_string());
+        assert_eq!(py_str_f64(mean), py_str_f64(np_mean_f64(&lf)));
+        assert_eq!(mode, 10);
+    }
+
+    #[test]
+    fn first_modal_length_matches_python_first_max() {
+        let mut counts = Vec::new();
+        assert_eq!(length_stats_and_first_mode(&[9, 5, 9, 5], &mut counts).3, 9);
+        assert_eq!(
+            length_stats_and_first_mode(&[4, 7, 7, 4, 7, 4], &mut counts).3,
+            4
+        );
+        assert_eq!(length_stats_and_first_mode(&[8], &mut counts).3, 8);
+    }
+
+    #[test]
+    fn summary_stats_uses_roary_counts() {
+        let base =
+            std::env::temp_dir().join(format!("panaroo-summary-test-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let dir_path = crate::support::pytempfile::mkdtemp(&base).unwrap();
+        let dir = format!("{}/", dir_path.display());
+        std::fs::write(
+            format!("{dir}gene_presence_absence_roary.csv"),
+            concat!(
+                "Gene,Non-unique Gene name,Annotation,No. isolates,No. sequences,Avg sequences per isolate,Genome Fragment,Order within Fragment,Accessory Fragment,Accessory Order with Fragment,QC,Min group size nuc,Max group size nuc,Avg group size nuc,s1,s2,s3,s4\n",
+                "g1,,,4,,,,,,,,,,,a,b,c,d\n",
+                "g2,,,3,,,,,,,,,,,a,b,c,\n",
+                "g3,,,2,,,,,,,,,,,a,b,,\n",
+                "g4,,,0,,,,,,,,,,,,,,\n",
+            ),
+        )
+        .unwrap();
+
+        generate_summary_stats(&dir);
+        let summary = std::fs::read_to_string(format!("{dir}summary_statistics.txt")).unwrap();
+        assert_eq!(
+            summary,
+            "Core genes\t(99% <= strains <= 100%)\t1\n\
+             Soft core genes\t(95% <= strains < 99%)\t0\n\
+             Shell genes\t(15% <= strains < 95%)\t2\n\
+             Cloud genes\t(0% <= strains < 15%)\t1\n\
+             Total genes\t(0% <= strains <= 100%)\t4"
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn update_col_counts_matches_numpy_masking() {

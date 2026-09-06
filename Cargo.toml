@@ -106,23 +106,27 @@ required-features = ["mafft-embedded"]
 
 [dependencies]
 anyhow = "1"
-# `version` is required by `cargo package`, which strips the `git` spec on publish and
-# resolves from crates.io. Neither embedded crate is on crates.io, so a crates.io user
-# cannot enable these features -- they are for source builds. Both features are off by
-# default, so the published crate itself is unaffected.
+# DECISION: this crate is not published to crates.io, and neither are the embedded
+# backends. Each is depended on wherever its latest code lives -- GitHub or a local
+# checkout -- and that location is expected to change as work moves between the two.
 #
-# Gated behind `cdhit-embedded` so the default build never sees it. NOTE it is
-# GPL-2.0-or-later, unlike this crate.
-cdhit-rs = { git = "https://github.com/henriksson-lab/cdhit-rs", version = "0.1", optional = true }
+# cd-hit: latest is the LOCAL checkout -- it now has the block-split fix that makes `-T`
+# actually parallelise (5x at -T 20; the GitHub rev ad8ac21 is effectively serial).
+# Switch back to `{ git = "https://github.com/henriksson-lab/cdhit-rs", rev = "..." }`
+# once that is pushed. Gated behind `cdhit-embedded` so the default build never sees it.
+# NOTE it is GPL-2.0-or-later, unlike this crate.
+cdhit-rs = { path = "/data/henriksson/github/claude/cdhit-rs", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 # The `mafft-bin` crate of the fork, whose package name is `mafft-rs`. It carries the
 # CLI's flag->behaviour layer (`--auto` mode selection, `--adjustdirection` strand
 # detection), which is the part that must not be re-derived by a caller.
 #
-# TODO: pin `rev = "2dfd1896c056899fb67e7b3c6f3ae84b7229f55d"` once that commit is
-# pushed -- it is where `run_from_with_progress` / `SilentProgress` first appear. A rev
-# cannot be pinned before it exists on the remote: cargo must fetch it to resolve.
-mafft-rs = { git = "https://github.com/mahogny/rust-MAFFT", version = "0.1", optional = true }
+# MAFFT: latest is the LOCAL fork checkout (commit 2dfd189, which adds
+# `run_from_with_progress` / `SilentProgress`; not yet on GitHub). Switch to
+#   { git = "https://github.com/mahogny/rust-MAFFT", rev = "..." }
+# once that commit is pushed. `mafft-embedded` therefore builds only on a machine that
+# has this checkout, which is why CI does not enable it.
+mafft-rs = { path = "/home/mahogny/github/claude/rust-MAFFT/crates/mafft-bin", optional = true }
 indexmap = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -137,9 +141,8 @@ lto = "thin"
 # Build docs with `cli` on so the feature is not invisible on docs.rs.
 all-features = true
 
-# TEMPORARY -- remove once commit 2dfd189 is on the remote. Overrides the git source with
-# the local fork checkout so the `mafft-embedded` feature builds against the unpushed
-# progress-sink API. Must be the LAST table in this file: everything below a `[patch]`
-# header is parsed as part of it.
-[patch."https://github.com/mahogny/rust-MAFFT"]
-mafft-rs = { path = "/home/mahogny/github/claude/rust-MAFFT/crates/mafft-bin" }
+# Release codegen plus DWARF line tables, for `perf`. Never used for shipping builds.
+#   cargo build --profile profiling --features cli
+[profile.profiling]
+inherits = "release"
+debug = 1

@@ -469,6 +469,11 @@ pub fn print_stage_progress(
 ///
 /// Like `check_cdhit_version`, this greps the **repr of the CompletedProcess object**.
 pub fn check_aligner_install(aligner: &str) -> bool {
+    #[cfg(feature = "mafft-embedded")]
+    if aligner == "mafft" {
+        return true;
+    }
+
     let command = match aligner {
         "clustal" => "clustalo --help",
         "prank" => "prank -help",
@@ -748,13 +753,8 @@ pub fn output_sequence(
     temp_directory: &str,
     outdir: &str,
 ) -> Option<String> {
-    use crate::support::seqio::{write_fasta_file, SeqRecord};
-
     // Get the name of the sequences for the gene of interest
     let sequence_ids = &node.seq_ids;
-    let mut output_sequences: Vec<SeqRecord> = Vec::new();
-    // Counter for the number of sequences for downstream check of >1
-    let mut isolate_no = 0usize;
 
     // Look for gene sequences among all genes. The Python scans the whole combined FASTA
     // here and keeps the records whose id is in `seqIDs`, which yields them in FILE order;
@@ -769,28 +769,34 @@ pub fn output_sequence(
     }
     positions.sort_unstable();
 
-    for i in positions {
-        output_sequences.push(SeqRecord::new(
-            combined_dna.records[i].seq.clone(),
-            combined_dna.names[i].clone(),
-            String::new(),
-        ));
-        isolate_no += 1;
-    }
-
     // set filename to gene name, if more than one sequence to be aligned
-    let outname = if isolate_no > 1 {
+    let outname = if positions.len() > 1 {
         get_temp_dna_input_path(node, temp_directory)
     } else {
         // If only one sequence, output it to the aligned directory and break
         let outname = get_expected_gene_alignment_path(node, outdir, false);
-        write_fasta_file(&output_sequences, &outname);
+        write_combined_dna_positions(combined_dna, &positions, &outname);
         return None;
     };
 
     // Write them to disk
-    write_fasta_file(&output_sequences, &outname);
+    write_combined_dna_positions(combined_dna, &positions, &outname);
     Some(outname)
+}
+
+fn write_combined_dna_positions(combined_dna: &CombinedDna, positions: &[usize], path: &str) {
+    use crate::support::seqio::write_fasta_record;
+
+    let file =
+        std::fs::File::create(path).unwrap_or_else(|e| panic!("could not create {path}: {e}"));
+    let mut writer = std::io::BufWriter::new(file);
+    for &i in positions {
+        write_fasta_record(
+            &combined_dna.names[i],
+            &combined_dna.records[i].seq,
+            &mut writer,
+        );
+    }
 }
 
 /// `generate_alignments.py::output_dna_and_protein`
@@ -799,45 +805,43 @@ pub fn output_sequence(
 /// slots are `None` when the gene needs no MSA.
 pub fn output_dna_and_protein(
     node: &NodeAttrs,
-    isolate_list: &[String],
+    clean_isolates: &[String],
     temp_directory: &str,
     outdir: &str,
     all_proteins: &std::collections::HashMap<String, SeqRecord>,
     all_dna: &std::collections::HashMap<String, SeqRecord>,
 ) -> (Option<String>, Option<String>) {
-    use crate::support::seqio::{write_fasta_file, SeqRecord};
+    use crate::support::seqio::write_fasta_record;
 
     let sequence_ids = &node.seq_ids;
-    let mut output_dna: Vec<SeqRecord> = Vec::new();
-    let mut output_protein: Vec<SeqRecord> = Vec::new();
-    let mut isolate_no = 0usize;
 
-    for seq_id in sequence_ids.iter() {
-        let isolate_num: usize = seq_id.split('_').next().unwrap().parse().unwrap();
-        let isolate_name = format!("{};{}", isolate_list[isolate_num].replace(';', ""), seq_id);
-        output_dna.push(SeqRecord::new(
-            all_dna[seq_id].seq.clone(),
-            isolate_name.clone(),
-            String::new(),
-        ));
-        output_protein.push(SeqRecord::new(
-            all_proteins[seq_id].seq.clone(),
-            isolate_name,
-            String::new(),
-        ));
-        isolate_no += 1;
-    }
-
-    if isolate_no > 1 {
+    if sequence_ids.len() > 1 {
         let prot_name = get_expected_protein_input_path(node, temp_directory);
         let dna_name = get_expected_unaligned_dna_path(node, outdir);
-        write_fasta_file(&output_protein, &prot_name);
-        write_fasta_file(&output_dna, &dna_name);
+        let prot_file = std::fs::File::create(&prot_name)
+            .unwrap_or_else(|e| panic!("could not create {prot_name}: {e}"));
+        let dna_file = std::fs::File::create(&dna_name)
+            .unwrap_or_else(|e| panic!("could not create {dna_name}: {e}"));
+        let mut prot_writer = std::io::BufWriter::new(prot_file);
+        let mut dna_writer = std::io::BufWriter::new(dna_file);
+        for seq_id in sequence_ids.iter() {
+            let isolate_num: usize = seq_id.split('_').next().unwrap().parse().unwrap();
+            let isolate_name = format!("{};{}", clean_isolates[isolate_num], seq_id);
+            write_fasta_record(&isolate_name, &all_proteins[seq_id].seq, &mut prot_writer);
+            write_fasta_record(&isolate_name, &all_dna[seq_id].seq, &mut dna_writer);
+        }
         (Some(prot_name), Some(dna_name))
     } else {
         // a single-sequence gene needs no MSA -- write the final output directly
         let outname = get_expected_gene_alignment_path(node, outdir, true);
-        write_fasta_file(&output_dna, &outname);
+        let file = std::fs::File::create(&outname)
+            .unwrap_or_else(|e| panic!("could not create {outname}: {e}"));
+        let mut writer = std::io::BufWriter::new(file);
+        for seq_id in sequence_ids.iter() {
+            let isolate_num: usize = seq_id.split('_').next().unwrap().parse().unwrap();
+            let isolate_name = format!("{};{}", clean_isolates[isolate_num], seq_id);
+            write_fasta_record(&isolate_name, &all_dna[seq_id].seq, &mut writer);
+        }
         (None, None)
     }
 }
@@ -855,9 +859,10 @@ pub struct AlignCommand {
     pub command: Option<String>,
     /// `command[1]` — the input file, removed after the alignment runs.
     pub input_path: Option<String>,
-    /// `get_align_dna_to_alignment_commands` returns `command[0]` as an **argv list**, not
-    /// a string, and `realign_dna_sequences` runs `command[0][:-1]` while writing stdout to
-    /// `command[0][-1]`. Kept as a separate field so the two shapes stay distinguishable.
+    /// Tokenized command for call sites that can avoid shell parsing. For ordinary MAFFT
+    /// alignments this is the MAFFT argv; for profile realignment it is the Python-shaped
+    /// `command[0]` argv, where `realign_dna_sequences` runs `command[0][:-1]` and writes
+    /// stdout to `command[0][-1]`.
     pub argv: Option<Vec<String>>,
 }
 
@@ -890,10 +895,14 @@ pub fn get_alignment_commands(
         ),
         other => panic!("unknown aligner: {other}"),
     };
+    #[cfg(feature = "mafft-embedded")]
+    let argv = (aligner == "mafft").then(|| crate::mafft_embedded::argv_from_command(&command));
+    #[cfg(not(feature = "mafft-embedded"))]
+    let argv = None;
     AlignCommand {
         command: Some(command),
         input_path: Some(fastafile_name.to_string()),
-        argv: None,
+        argv,
     }
 }
 
@@ -938,10 +947,14 @@ pub fn get_protein_commands(
         ),
         other => panic!("unknown aligner: {other}"),
     };
+    #[cfg(feature = "mafft-embedded")]
+    let argv = (aligner == "mafft").then(|| crate::mafft_embedded::argv_from_command(&command));
+    #[cfg(not(feature = "mafft-embedded"))]
+    let argv = None;
     AlignCommand {
         command: Some(command),
         input_path: Some(fastafile_name.to_string()),
-        argv: None,
+        argv,
     }
 }
 
@@ -999,10 +1012,20 @@ pub fn align_sequences(command: &AlignCommand, outdir: &str, aligner: &str) -> b
         // the command, which is the input path.
         let name = gene_name_of(cmd.split_whitespace().last().unwrap_or(""));
         #[cfg(feature = "mafft-embedded")]
-        let stdout = crate::mafft_embedded::run_mafft(cmd);
+        {
+            let out_path = format!("{outdir}{name}.aln.fas");
+            if let Some(argv) = command.argv.as_ref() {
+                crate::mafft_embedded::run_mafft_argv_to_file(argv, &out_path);
+            } else {
+                let stdout = crate::mafft_embedded::run_mafft(cmd);
+                std::fs::write(out_path, stdout).expect("write alignment");
+            }
+        }
         #[cfg(not(feature = "mafft-embedded"))]
-        let (stdout, _stderr) = crate::support::proc::popen_communicate(cmd);
-        std::fs::write(format!("{outdir}{name}.aln.fas"), stdout).expect("write alignment");
+        {
+            let (stdout, _stderr) = crate::support::proc::popen_communicate(cmd);
+            std::fs::write(format!("{outdir}{name}.aln.fas"), stdout).expect("write alignment");
+        }
     } else {
         let r = crate::support::proc::run_shell_capture(cmd);
         if r.returncode != 0 {
@@ -1026,8 +1049,23 @@ pub fn realign_dna_sequences(command: &AlignCommand, _outdir: &str, aligner: &st
         "mafft" | "muscle" | "muscle-super5" | "famsa" => {
             // run argv[:-1] and write stdout to argv[-1]
             let out_path = argv.last().unwrap();
-            let (stdout, _err) = crate::support::proc::popen_argv(&argv[..argv.len() - 1]);
-            std::fs::write(out_path, stdout).expect("write realignment");
+            #[cfg(feature = "mafft-embedded")]
+            {
+                if aligner == "mafft" {
+                    crate::mafft_embedded::run_mafft_argv_to_file(
+                        &argv[..argv.len() - 1],
+                        out_path,
+                    );
+                } else {
+                    let (stdout, _err) = crate::support::proc::popen_argv(&argv[..argv.len() - 1]);
+                    std::fs::write(out_path, stdout).expect("write realignment");
+                }
+            }
+            #[cfg(not(feature = "mafft-embedded"))]
+            {
+                let (stdout, _err) = crate::support::proc::popen_argv(&argv[..argv.len() - 1]);
+                std::fs::write(out_path, stdout).expect("write realignment");
+            }
         }
         "clustal" => {
             let r = crate::support::proc::run_argv(argv);
@@ -1043,31 +1081,30 @@ pub fn realign_dna_sequences(command: &AlignCommand, _outdir: &str, aligner: &st
     }
     true
 }
-
 /// `generate_alignments.py::multi_align_sequences`
 pub fn multi_align_sequences(
-    commands: &[AlignCommand],
+    commands: Vec<AlignCommand>,
     outdir: &str,
     threads: i64,
     aligner: &str,
 ) -> Vec<bool> {
     let outdir = outdir.to_string();
     let aligner = aligner.to_string();
-    crate::support::parallel::parallel_map(threads, commands.to_vec(), move |c| {
+    crate::support::parallel::parallel_map(threads, commands, move |c| {
         align_sequences(&c, &outdir, &aligner)
     })
 }
 
 /// `generate_alignments.py::multi_realign_sequences`
 pub fn multi_realign_sequences(
-    commands: &[AlignCommand],
+    commands: Vec<AlignCommand>,
     outdir: &str,
     threads: i64,
     aligner: &str,
 ) -> Vec<bool> {
     let outdir = outdir.to_string();
     let aligner = aligner.to_string();
-    crate::support::parallel::parallel_map(threads, commands.to_vec(), move |c| {
+    crate::support::parallel::parallel_map(threads, commands, move |c| {
         realign_dna_sequences(&c, &outdir, &aligner)
     })
 }
@@ -1089,7 +1126,7 @@ pub fn read_alignment(handle: &str) -> MultipleSeqAlignment {
 /// Raises on duplicate or mismatched IDs.
 pub fn reorder_protein_alignment_to_match_dna(
     dna_records: &[SeqRecord],
-    protein_alignment: &MultipleSeqAlignment,
+    protein_alignment: MultipleSeqAlignment,
     gene_name: &str,
 ) -> MultipleSeqAlignment {
     use std::collections::HashSet;
@@ -1112,15 +1149,15 @@ pub fn reorder_protein_alignment_to_match_dna(
         panic!("ValueError: DNA and protein sequence IDs do not match for gene: {gene_name}");
     }
 
-    let by_id: std::collections::HashMap<&str, &SeqRecord> = protein_alignment
+    let mut by_id: std::collections::HashMap<String, SeqRecord> = protein_alignment
         .records
-        .iter()
-        .map(|r| (r.id.as_str(), r))
+        .into_iter()
+        .map(|r| (r.id.clone(), r))
         .collect();
     MultipleSeqAlignment {
         records: dna_records
             .iter()
-            .map(|r| by_id[r.id.as_str()].clone())
+            .map(|r| by_id.remove(r.id.as_str()).expect("protein id checked"))
             .collect(),
     }
 }
@@ -1209,15 +1246,16 @@ pub fn reverse_translate_sequences(
             panic!("ValueError: DNA and protien sequence IDs do not match!");
         }
     }
+    let gene_names: Vec<String> = dna_sequence_files.iter().map(|f| gene_name_of(f)).collect();
 
     // Read in files (multithreaded)
+    let dna_sequence_jobs: Vec<&String> = dna_sequence_files.iter().collect();
+    let protein_sequence_jobs: Vec<&String> = protein_sequence_files.iter().collect();
     let dna_sequences: Vec<Vec<SeqRecord>> =
-        crate::support::parallel::parallel_map(threads, dna_sequence_files.to_vec(), |x| {
-            read_sequences(&x)
-        });
+        crate::support::parallel::parallel_map(threads, dna_sequence_jobs, |x| read_sequences(x));
     let protein_alignments: Vec<MultipleSeqAlignment> =
-        crate::support::parallel::parallel_map(threads, protein_sequence_files.to_vec(), |x| {
-            read_alignment(&x)
+        crate::support::parallel::parallel_map(threads, protein_sequence_jobs, |x| {
+            read_alignment(x)
         });
 
     let mut clean_dna: Vec<Vec<SeqRecord>> = Vec::new();
@@ -1233,11 +1271,12 @@ pub fn reverse_translate_sequences(
 
     let trans_table = get_trans_table(11);
 
-    for index in 0..dna_sequences.len() {
-        let dna = &dna_sequences[index];
-        let gene_name = gene_name_of(&dna_sequence_files[index]);
-        let protein =
-            reorder_protein_alignment_to_match_dna(dna, &protein_alignments[index], &gene_name);
+    for ((dna, protein_alignment), gene_name) in dna_sequences
+        .into_iter()
+        .zip(protein_alignments.into_iter())
+        .zip(gene_names.iter())
+    {
+        let protein = reorder_protein_alignment_to_match_dna(&dna, protein_alignment, gene_name);
         let mut seqids_to_remove: Vec<String> = Vec::new();
 
         for seq_index in 0..dna.len() {
@@ -1294,16 +1333,15 @@ pub fn reverse_translate_sequences(
             let mut clean_nucs = Vec::new();
             for sequence in dna {
                 if remove.contains(&sequence.id) {
-                    reject_dna.push(sequence.clone());
+                    reject_dna.push(sequence);
                 } else {
-                    clean_nucs.push(sequence.clone());
+                    clean_nucs.push(sequence);
                 }
             }
             let clean_prots: Vec<SeqRecord> = protein
                 .records
-                .iter()
+                .into_iter()
                 .filter(|s| !remove.contains(&s.id))
-                .cloned()
                 .collect();
 
             clean_dna.push(clean_nucs);
@@ -1315,7 +1353,7 @@ pub fn reverse_translate_sequences(
             write_fasta_file(&reject_dna, &reject_outname);
             reject_dna_files.insert(gene_name.clone(), reject_outname);
         } else {
-            clean_dna.push(dna.clone());
+            clean_dna.push(dna);
             clean_proteins.push(protein);
         }
     }
@@ -1328,14 +1366,11 @@ pub fn reverse_translate_sequences(
         None,
     );
 
-    let jobs: Vec<(MultipleSeqAlignment, Vec<SeqRecord>, String)> = (0..clean_proteins.len())
-        .map(|i| {
-            (
-                clean_proteins[i].clone(),
-                clean_dna[i].clone(),
-                gene_name_of(&dna_sequence_files[i]),
-            )
-        })
+    let jobs: Vec<(MultipleSeqAlignment, Vec<SeqRecord>, String)> = clean_proteins
+        .into_iter()
+        .zip(clean_dna)
+        .zip(gene_names)
+        .map(|((protein, dna), name)| (protein, dna, name))
         .collect();
     let all_codon_alignments: Vec<(String, MultipleSeqAlignment)> =
         crate::support::parallel::parallel_map(threads, jobs, |(p, d, n)| {
@@ -1385,7 +1420,7 @@ pub fn reverse_translate_sequences(
 
     println!("Aligning untranslatable DNA...");
     multi_realign_sequences(
-        &dna2codons_commands,
+        dna2codons_commands,
         &format!("{outdir}aligned_gene_sequences/"),
         threads,
         aligner,
@@ -1547,5 +1582,11 @@ mod tests {
         assert_eq!(join("/o", &["a", "b"]), "/o/a/b");
         assert_eq!(join("/o/", &["a"]), "/o/a");
         assert_eq!(join("/o", &["/abs"]), "/abs");
+    }
+
+    #[cfg(feature = "mafft-embedded")]
+    #[test]
+    fn embedded_mafft_install_check_does_not_need_a_mafft_binary() {
+        assert!(check_aligner_install("mafft"));
     }
 }

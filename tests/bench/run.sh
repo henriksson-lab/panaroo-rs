@@ -14,6 +14,7 @@
 #   -F FEATS     cargo features for the Rust build (default cli)
 #   -k           keep the per-run output directories (default: deleted after measuring)
 #   -V           skip the output-equivalence verification
+#   -W           skip discarded warm-up runs; verify the first timed outputs instead
 #   -P           python only (skip the Rust side)
 #
 # Requires the pinned parity env:  conda activate panaroo-parity
@@ -39,11 +40,12 @@ mode=strict
 features=cli
 keep=0
 verify=1
+warmup=1
 python_only=0
 
 dataset="${1:-ci}"
 if [[ $# -gt 0 && "$dataset" != -* ]]; then shift; else dataset=ci; fi
-while getopts "n:T:m:r:o:F:kVP" opt; do
+while getopts "n:T:m:r:o:F:kVWP" opt; do
   case "$opt" in
     n) repeats="$OPTARG" ;;
     T) threadlist="$OPTARG" ;;
@@ -53,6 +55,7 @@ while getopts "n:T:m:r:o:F:kVP" opt; do
     F) features="$OPTARG" ;;
     k) keep=1 ;;
     V) verify=0 ;;
+    W) warmup=0 ;;
     P) python_only=1 ;;
     *) sed -n '2,20p' "$0" >&2; exit 2 ;;
   esac
@@ -185,7 +188,11 @@ printf '%s\n' "run_id	dataset	n_genomes	impl	threads	rep	phase	exit_status	wall_
   echo "clean_mode             $mode"
   echo "extra_args             ${extra[*]:-<none>}"
   echo "thread_counts          ${threads[*]}"
-  echo "timed_repeats          $repeats (plus 1 discarded warm-up per configuration)"
+  if [[ "$warmup" == 1 ]]; then
+    echo "timed_repeats          $repeats (plus 1 discarded warm-up per configuration)"
+  else
+    echo "timed_repeats          $repeats (no warm-up; -W)"
+  fi
   echo
   echo "Both sides are launched from this shell, so they inherit one PATH and therefore"
   echo "resolve the SAME cd-hit / mafft binaries listed above. With no -a/--alignment in"
@@ -269,28 +276,23 @@ print(d['peak_tree_rss_kb'], d['peak_tree_pss_kb'] if d['peak_tree_pss_kb'] is n
   [[ "$st" == 0 ]] || echo "     ^ FAILED; log: $lf" >&2
 }
 
-impls=(python)
-[[ "$rust_ok" == 1 ]] && impls+=(rust)
+verify_outputs() {
+  local phase="$1"
+  local py_out rs_out
 
-echo
-echo "== warm-up (discarded: fills the page cache and any import cache for both sides) =="
-for th in "${threads[@]}"; do
-  for impl in "${impls[@]}"; do
-    measure "$impl" "$th" 0 warmup "$run_dir/out/$impl-t$th-warmup"
-  done
-done
-
-# --------------------------------------------------------- output equivalence check ---
-# A speed number for a run that computed something different is not a speed number.
-verified="not checked"
-if [[ "$verify" == 1 && "$rust_ok" == 1 ]]; then
   echo
-  echo "== output equivalence (warm-up outputs, tests/parity/canonicalise.py) =="
+  echo "== output equivalence ($phase outputs, tests/parity/canonicalise.py) =="
   allok=1
   for th in "${threads[@]}"; do
     echo "-- -t $th"
-    if python3 "$repo/tests/parity/canonicalise.py" \
-         "$run_dir/out/python-t$th-warmup" "$run_dir/out/rust-t$th-warmup" \
+    if [[ "$phase" == warm-up ]]; then
+      py_out="$run_dir/out/python-t$th-warmup"
+      rs_out="$run_dir/out/rust-t$th-warmup"
+    else
+      py_out="$run_dir/out/python-t$th-r1"
+      rs_out="$run_dir/out/rust-t$th-r1"
+    fi
+    if python3 "$repo/tests/parity/canonicalise.py" "$py_out" "$rs_out" \
          > "$run_dir/logs/verify-t$th.txt" 2>&1; then
       echo "   OK: identical (tier 0/1) -- see logs/verify-t$th.txt"
     else
@@ -301,6 +303,26 @@ if [[ "$verify" == 1 && "$rust_ok" == 1 ]]; then
   done
   if [[ "$allok" == 1 ]]; then verified="identical output (tier 0/1) at all thread counts"
   else verified="OUTPUTS DIFFER -- timings below compare runs that computed different things"; fi
+}
+
+impls=(python)
+[[ "$rust_ok" == 1 ]] && impls+=(rust)
+
+# --------------------------------------------------------- output equivalence check ---
+# A speed number for a run that computed something different is not a speed number.
+verified="not checked"
+if [[ "$warmup" == 1 ]]; then
+  echo
+  echo "== warm-up (discarded: fills the page cache and any import cache for both sides) =="
+  for th in "${threads[@]}"; do
+    for impl in "${impls[@]}"; do
+      measure "$impl" "$th" 0 warmup "$run_dir/out/$impl-t$th-warmup"
+    done
+  done
+  [[ "$verify" == 1 && "$rust_ok" == 1 ]] && verify_outputs warm-up
+else
+  echo
+  echo "== warm-up skipped (-W) =="
 fi
 
 echo
@@ -313,13 +335,21 @@ for rep in $(seq 1 "$repeats"); do
   done
 done
 
+if [[ "$warmup" == 0 && "$verify" == 1 && "$rust_ok" == 1 ]]; then
+  verify_outputs "timed rep 1"
+fi
+
 if [[ "$keep" == 0 ]]; then safe_rm_rf "$repo/tests" "$run_dir/out"; fi
 
 # ----------------------------------------------------------------------- summary ---
 echo
 echo "==================================== SUMMARY ===================================="
 echo "dataset $name ($n_genomes genomes)   clean-mode $mode   extra args: ${extra[*]:-<none>}"
-echo "repeats $repeats (+1 warm-up discarded)   host $(hostname), ${ncpu_phys:-?} physical / $ncpu logical cores"
+if [[ "$warmup" == 1 ]]; then
+  echo "repeats $repeats (+1 warm-up discarded)   host $(hostname), ${ncpu_phys:-?} physical / $ncpu logical cores"
+else
+  echo "repeats $repeats (warm-up skipped)   host $(hostname), ${ncpu_phys:-?} physical / $ncpu logical cores"
+fi
 echo "cpu   $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
 echo "load  start $load_start / end $(cut -d' ' -f1-3 /proc/loadavg) (1/5/15 min)"
 echo "idle  $idle_note"

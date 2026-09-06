@@ -136,15 +136,7 @@ pub const FASTA_WRAP: usize = 60;
 pub fn write_fasta<W: Write>(records: &[SeqRecord], out: &mut W) {
     for r in records {
         writeln!(out, ">{}", fasta_title(r)).expect("write");
-        let b = r.seq.as_bytes();
-        if b.is_empty() {
-            writeln!(out).expect("write");
-            continue;
-        }
-        for chunk in b.chunks(FASTA_WRAP) {
-            out.write_all(chunk).expect("write");
-            out.write_all(b"\n").expect("write");
-        }
+        write_fasta_sequence(&r.seq, out);
     }
 }
 
@@ -153,6 +145,24 @@ pub fn write_fasta_file(records: &[SeqRecord], path: &str) {
     let f = std::fs::File::create(path).unwrap_or_else(|e| panic!("could not create {path}: {e}"));
     let mut w = std::io::BufWriter::new(f);
     write_fasta(records, &mut w);
+}
+
+fn write_fasta_sequence<W: Write>(seq: &str, out: &mut W) {
+    let b = seq.as_bytes();
+    if b.is_empty() {
+        writeln!(out).expect("write");
+        return;
+    }
+    for chunk in b.chunks(FASTA_WRAP) {
+        out.write_all(chunk).expect("write");
+        out.write_all(b"\n").expect("write");
+    }
+}
+
+/// Write one FASTA record whose description is empty, i.e. the header is exactly `>{id}`.
+pub fn write_fasta_record<W: Write>(id: &str, seq: &str, out: &mut W) {
+    writeln!(out, ">{id}").expect("write");
+    write_fasta_sequence(seq, out);
 }
 
 /// `SeqIO.parse(open(path), "genbank")` — implemented in [`super::genbank`], which is its

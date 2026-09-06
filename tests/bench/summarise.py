@@ -106,6 +106,8 @@ def markdown(groups, order, rows, envfile, verified, out):
     extra = rows[0]["extra_args"] if rows else ""
     n_reps = max(len(v) for v in groups.values()) if groups else 0
     single = n_reps < 2
+    warmup_ran = any(r["phase"] == "warmup" for r in rows)
+    warmup_text = "preceded by one discarded warm-up" if warmup_ran else "with no discarded warm-up"
 
     env = {}
     if envfile and os.path.exists(envfile):
@@ -122,7 +124,7 @@ def markdown(groups, order, rows, envfile, verified, out):
 
     if single:
         L.append("> **These are SINGLE-RUN measurements.** One timed run per "
-                 "configuration, preceded by one discarded warm-up. **No run-to-run "
+                 f"configuration, {warmup_text}. **No run-to-run "
                  "variance was measured**, so there is no spread to report and the "
                  "ratios below are approximate: read them as rough magnitudes, not as "
                  "established figures. A ratio near 1 (say 0.9x-1.1x) is **not** "
@@ -130,8 +132,8 @@ def markdown(groups, order, rows, envfile, verified, out):
                  "`tests/bench/run.sh <dataset> -n 5` for figures with a measured "
                  "spread.\n")
     else:
-        L.append(f"{n_reps} timed repeats per configuration, preceded by one discarded "
-                 "warm-up; repeats interleaved python/rust so machine drift hits both "
+        L.append(f"{n_reps} timed repeats per configuration, {warmup_text}; "
+                 "repeats interleaved python/rust so machine drift hits both "
                  "equally. Cells show median (min-max).\n")
 
     if verified:
@@ -208,7 +210,7 @@ def markdown(groups, order, rows, envfile, verified, out):
         L.append("")
         for f in dict.fromkeys(flagged):
             L.append(f"\u2020 {f}.")
-    L.append(FOOTNOTE)
+    L.append(FOOTNOTE.strip())
 
     if env.get("loadavg_at_start"):
         try:

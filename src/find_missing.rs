@@ -2,7 +2,7 @@
 
 use crate::support::graph::Graph;
 use crate::support::pydict::PyDict;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// `find_missing.py::blosum50`
 ///
@@ -54,7 +54,7 @@ pub fn find_missing(
 ) {
     use crate::merge_nodes::{delete_node, remove_member_from_node};
     use crate::support::pydict::PyDict as Dict;
-    use std::collections::{BTreeSet, HashMap as Map, HashSet};
+    use std::collections::{HashMap as Map, HashSet};
     use std::io::Write;
 
     // generate mapping between internal nodes and gff ids
@@ -146,24 +146,19 @@ pub fn find_missing(
         println!("Searching...");
     }
 
-    let jobs: Vec<(usize, String)> = gff_file_handles.iter().cloned().enumerate().collect();
-    let results = crate::support::parallel::parallel_map(n_cpu, jobs, |(member, gff_handle)| {
+    let jobs: Vec<usize> = (0..gff_file_handles.len()).collect();
+    let results = crate::support::parallel::parallel_map(n_cpu, jobs, |member| {
         let empty_search: Dict<usize, BTreeSet<(String, String)>> = Dict::new();
+        let empty_conflicts: BTreeSet<(usize, String)> = BTreeSet::new();
+        let empty_merged: Map<usize, String> = Map::new();
         let sl = search_list.get(&member).unwrap_or(&empty_search);
-        let mut sl_vecs: Dict<usize, Vec<(String, String)>> = Dict::new();
-        for (k, v) in sl.items() {
-            sl_vecs.insert(*k, v.iter().cloned().collect());
-        }
-        let cf: Vec<(usize, String)> = conflicts
-            .get(&member)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default();
-        let mn = merged_nodes.get(&member).cloned().unwrap_or_default();
+        let cf = conflicts.get(&member).unwrap_or(&empty_conflicts);
+        let mn = merged_nodes.get(&member).unwrap_or(&empty_merged);
         search_gff(
-            &sl_vecs,
-            &cf,
-            &gff_handle,
-            &mn,
+            sl,
+            cf,
+            &gff_file_handles[member],
+            mn,
             search_radius,
             prop_match,
             pairwise_id_thresh,
@@ -179,9 +174,10 @@ pub fn find_missing(
 
     let mut hits_trans_dict: Vec<Vec<String>> = Vec::with_capacity(results.len());
     for r in &results {
-        let jobs: Vec<(usize, String)> = r.hits.clone();
-        let trans = crate::support::parallel::parallel_map(n_cpu, jobs, |(node, hit)| {
-            translate_to_match(&hit, &g.node(node).protein[0])
+        let jobs: Vec<usize> = (0..r.hits.len()).collect();
+        let trans = crate::support::parallel::parallel_map(n_cpu, jobs, |i| {
+            let (node, hit) = &r.hits[i];
+            translate_to_match(hit, &g.node(*node).protein[0])
         });
         hits_trans_dict.push(trans);
     }
@@ -296,8 +292,8 @@ pub fn find_missing(
                 continue;
             }
 
-            let hit_protein = hits_trans_dict[member][i].clone();
-            let loc = &r.node_locs.get(node).expect("node_locs entry").1;
+            let hit_protein = &hits_trans_dict[member][i];
+            let (contig_id, loc) = r.node_locs.get(node).expect("node_locs entry");
             let hit_strand = if loc[2] == 0 { '+' } else { '-' };
             let refound_id = format!("{member}_refound_{n_found}");
 
@@ -317,18 +313,9 @@ pub fn find_missing(
             let gff_name = file_stem(&gff_file_handles[member]);
             writeln!(
                 data_out,
-                "{}",
-                [
-                    gff_name.as_str(),
-                    r.node_locs.get(node).unwrap().0.as_str(),
-                    refound_id.as_str(),
-                    refound_id.as_str(),
-                    hit_protein.as_str(),
-                    dna_hit.as_str(),
-                    "",
-                    &format!("location:{}-{};strand:{}", loc[0], loc[1], hit_strand),
-                ]
-                .join(",")
+                "{gff_name},{contig_id},{refound_id},{refound_id},{hit_protein},{dna_hit},,location:{}-{};strand:{hit_strand}",
+                loc[0],
+                loc[1],
             )
             .expect("write csv");
 
@@ -350,6 +337,20 @@ fn file_stem(p: &str) -> String {
     }
 }
 
+fn filtered_gff_annotation(text: &str) -> String {
+    let mut ann = String::new();
+    for line in text.lines() {
+        if line.contains("##sequence-region") {
+            continue;
+        }
+        if !ann.is_empty() {
+            ann.push('\n');
+        }
+        ann.push_str(line);
+    }
+    ann
+}
+
 /// `find_missing.py::search_gff`
 ///
 /// // UPSTREAM BUG (`find_missing.py:329`): the `only_valid_genes` check reads `hit` and
@@ -366,8 +367,8 @@ fn file_stem(p: &str) -> String {
 /// but note the deviation.
 #[allow(clippy::too_many_arguments)]
 pub fn search_gff(
-    node_search_dict: &PyDict<usize, Vec<(String, String)>>,
-    conflicts: &[(usize, String)],
+    node_search_dict: &PyDict<usize, BTreeSet<(String, String)>>,
+    conflicts: &BTreeSet<(usize, String)>,
     gff_handle_name: &str,
     merged_nodes: &HashMap<usize, String>,
     search_radius: i64,
@@ -379,16 +380,6 @@ pub fn search_gff(
 ) -> SearchGffResult {
     use crate::support::pydict::PyDict as Dict;
     use std::collections::HashSet;
-
-    // sort sets to fix order -- upstream already does this, so it is not a Tier D site
-    let mut conflicts: Vec<(usize, String)> = conflicts.to_vec();
-    conflicts.sort();
-    let mut node_search: Dict<usize, Vec<(String, String)>> = Dict::new();
-    for (k, v) in node_search_dict.items() {
-        let mut v = v.clone();
-        v.sort();
-        node_search.insert(*k, v);
-    }
 
     let raw = std::fs::read_to_string(gff_handle_name)
         .unwrap_or_else(|e| panic!("could not read {gff_handle_name}: {e}"));
@@ -414,16 +405,12 @@ pub fn search_gff(
     }
 
     // load gff annotation
-    let ann: String = split[0]
-        .lines()
-        .filter(|l| !l.contains("##sequence-region"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let ann = filtered_gff_annotation(split[0]);
     let parsed_gff = crate::support::gff::GffDb::create_db(&ann)
         .unwrap_or_else(|e| panic!("NameError: File does not appear to be in GFF3 format! {e}"));
 
     // mask regions that already have genes and convert back to string
-    for (node, geneid) in &conflicts {
+    for (node, geneid) in conflicts {
         let gene = parsed_gff.get(geneid);
         let start = gene.start.min(gene.stop);
         let end = gene.start.max(gene.stop);
@@ -460,7 +447,7 @@ pub fn search_gff(
     // Duplicate-entry check. The masking write it once guarded is commented out upstream,
     // so this loop now only raises on duplicates.
     let mut seen: HashSet<(String, i64, i64)> = HashSet::new();
-    for (_node, geneid) in &conflicts {
+    for (_node, geneid) in conflicts {
         let gene = parsed_gff.get(geneid);
         let start = gene.start.min(gene.stop);
         let end = gene.start.max(gene.stop);
@@ -471,7 +458,7 @@ pub fn search_gff(
 
     // search for matches
     let mut hits: Vec<(usize, String)> = Vec::new();
-    for (node, searches) in node_search.items() {
+    for (node, searches) in node_search_dict.items() {
         let mut best_hit = String::new();
         let mut best_loc: Option<(String, Vec<i64>)> = None;
         // `hit` and `search` leak out of this loop and are read below -- see the bug note.
@@ -564,6 +551,8 @@ pub fn search_dna(
     pairwise_id_thresh: f64,
     _refind: bool,
 ) -> (String, Vec<i64>) {
+    use std::borrow::Cow;
+
     use crate::support::edlib::{align, Mode, Task};
     use crate::support::seq::reverse_complement;
 
@@ -576,8 +565,10 @@ pub fn search_dna(
 
     for (i, db_raw) in [db_seq, rc.as_str()].into_iter().enumerate() {
         // add some Ns at the start and end to deal with fragments at the end of contigs
-        let e = "E".repeat(added_e_len);
-        let db = format!("{e}{db_raw}{e}");
+        let mut db = String::with_capacity(db_raw.len() + 2 * added_e_len);
+        db.extend(std::iter::repeat('E').take(added_e_len));
+        db.push_str(db_raw);
+        db.extend(std::iter::repeat('E').take(added_e_len));
 
         let aln = align(
             search_sequence,
@@ -588,15 +579,9 @@ pub fn search_dna(
             &E_AND_N_EQUALITIES,
         );
 
-        // remove trailing inserts
-        let cig = split_cigar(aln.cigar.as_deref().unwrap_or(""));
-        let mut edit_distance = aln.edit_distance;
-        if cig.last().map(|s| s.as_str()) == Some("I") {
-            edit_distance -= cig[cig.len() - 2].parse::<i64>().unwrap_or(0);
-        }
-        if cig.get(1).map(|s| s.as_str()) == Some("I") {
-            edit_distance -= cig[0].parse::<i64>().unwrap_or(0);
-        }
+        // remove terminal inserts
+        let edit_distance =
+            aln.edit_distance - terminal_insert_adjustment(aln.cigar.as_deref().unwrap_or(""));
 
         let (start, end, tloc);
         if edit_distance == -1 || aln.locations.is_empty() {
@@ -625,26 +610,25 @@ pub fn search_dna(
             end = tloc.1 + 1;
         }
 
-        let mut possible_dbs = vec![db.clone()];
+        let mut possible_dbs: Vec<Cow<'_, str>> = Vec::with_capacity(3);
+        possible_dbs.push(Cow::Borrowed(db.as_str()));
         if db.contains("NNNNNNNNNNNNNNNNNNNN") {
-            possible_dbs.push(sub_leading_n_run(&db));
-            possible_dbs.push(sub_trailing_n_run(&db));
+            possible_dbs.push(Cow::Owned(sub_leading_n_run(&db)));
+            possible_dbs.push(Cow::Owned(sub_trailing_n_run(&db)));
         }
 
-        for posdb in &possible_dbs {
+        for posdb in possible_dbs {
+            let posdb = posdb.as_ref();
             let seg = &posdb[start as usize..(end as usize).min(posdb.len())];
-            let n_x = seg.matches('X').count() as f64;
-            let n_e = seg.matches('E').count() as f64;
+            let (n_x, n_e, acgt) = segment_counts(seg);
+            let n_x = n_x as f64;
+            let n_e = n_e as f64;
 
             let aln_length = (end - start) as f64 - n_x - n_e;
             if aln_length / search_sequence.len() as f64 <= prop_match {
                 continue;
             }
-            let acgt = (seg.matches('A').count()
-                + seg.matches('C').count()
-                + seg.matches('G').count()
-                + seg.matches('T').count()) as f64;
-            if acgt / search_sequence.len() as f64 <= prop_match {
+            if acgt as f64 / search_sequence.len() as f64 <= prop_match {
                 continue;
             }
 
@@ -674,9 +658,7 @@ pub fn search_dna(
         }
     }
 
-    let seq = found_dna.replace(['X', 'E'], "N");
-    let seq = seq.trim_matches('N').to_string();
-    (seq, loc)
+    (normalise_found_dna(&found_dna), loc)
 }
 
 /// `additionalEqualities` for `search_dna`: `N` and the padding character `E` both match
@@ -691,6 +673,79 @@ const E_AND_N_EQUALITIES: [(char, char); 8] = [
     ('G', 'E'),
     ('T', 'E'),
 ];
+
+fn normalise_found_dna(seq: &str) -> String {
+    let bytes = seq.as_bytes();
+    let mut start = 0usize;
+    while start < bytes.len() && matches!(bytes[start], b'N' | b'X' | b'E') {
+        start += 1;
+    }
+    let mut end = bytes.len();
+    while end > start && matches!(bytes[end - 1], b'N' | b'X' | b'E') {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end - start);
+    for &b in &bytes[start..end] {
+        match b {
+            b'X' | b'E' => out.push('N'),
+            _ => out.push(b as char),
+        }
+    }
+    out
+}
+
+fn segment_counts(seg: &str) -> (usize, usize, usize) {
+    let mut n_x = 0usize;
+    let mut n_e = 0usize;
+    let mut acgt = 0usize;
+    for b in seg.bytes() {
+        match b {
+            b'X' => n_x += 1,
+            b'E' => n_e += 1,
+            b'A' | b'C' | b'G' | b'T' => acgt += 1,
+            _ => {}
+        }
+    }
+    (n_x, n_e, acgt)
+}
+
+fn terminal_insert_adjustment(cigar: &str) -> i64 {
+    let bytes = cigar.as_bytes();
+    let mut i = 0usize;
+    let mut leading_insert = 0i64;
+    let mut trailing_insert = 0i64;
+    let mut first_op = true;
+
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let mut n = 0i64;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            n = n * 10 + (bytes[i] - b'0') as i64;
+            i += 1;
+        }
+        let op = bytes.get(i).copied();
+        if first_op {
+            first_op = false;
+            if op == Some(b'I') {
+                leading_insert = n;
+            }
+        }
+        trailing_insert = if op == Some(b'I') && i + 1 == bytes.len() {
+            n
+        } else {
+            0
+        };
+        if op.is_some() {
+            i += 1;
+        }
+    }
+
+    leading_insert + trailing_insert
+}
+
 /// `re.split(r'(\d+)', cigar)[1:]`
 ///
 /// Python's `re.split` with a **capturing group** returns
@@ -710,6 +765,7 @@ const E_AND_N_EQUALITIES: [(char, char); 8] = [
 /// trailing-insert correction in [`search_dna`] -- `cig[-1] == "I"` never matches -- and
 /// that correction is exactly what rescues a gene running off the end of a contig. On the
 /// smoke dataset the inverted version cost three refound genes.
+#[cfg(test)]
 fn split_cigar(cigar: &str) -> Vec<String> {
     let b = cigar.as_bytes();
     let mut full: Vec<String> = Vec::new();
@@ -788,7 +844,7 @@ fn sub_trailing_n_run(db: &str) -> String {
 /// Note the frame list is built as `[... for i in range(3) for s in dna_seqs]`, so the order
 /// is `(frame 0, fwd), (frame 0, rev), (frame 1, fwd), ...` — that ordering decides ties.
 pub fn translate_to_match(hit: &str, target_prot: &str) -> String {
-    use crate::support::seq::{reverse_complement, translate};
+    use crate::support::seq::reverse_complement;
     use std::collections::HashSet;
 
     if hit.is_empty() {
@@ -796,16 +852,61 @@ pub fn translate_to_match(hit: &str, target_prot: &str) -> String {
     }
 
     // translate in all 6 frames splitting on unknown
-    let dna_seqs = [hit.to_string(), reverse_complement(hit)];
+    let rc = reverse_complement(hit);
+    let dna_seqs = [hit, rc.as_str()];
 
     // `[... for i in range(3) for s in dna_seqs]` -- frame is the OUTER loop, so the order
     // is (frame0,fwd), (frame0,rev), (frame1,fwd), ... That ordering decides ties below.
+    let search_set: HashSet<&str> = (0..target_prot.len().saturating_sub(2))
+        .map(|i| &target_prot[i..i + 3])
+        .collect();
+
+    // `max(alignments, key=lambda x: x[1])` returns the FIRST maximum.
+    let mut best = String::new();
+    let mut best_n: i64 = -1;
+    for i in 0..3 {
+        for s in &dna_seqs {
+            let target_sequence = translate_padded_frame(s, i);
+            let query_set: HashSet<&str> = (0..target_sequence.len().saturating_sub(2))
+                .map(|i| &target_sequence[i..i + 3])
+                .collect();
+            let n = search_set.intersection(&query_set).count() as i64;
+            if n > best_n {
+                best_n = n;
+                best = target_sequence;
+            }
+        }
+    }
+    best
+}
+
+fn translate_padded_frame(seq: &str, frame: usize) -> String {
+    use crate::support::seq::translate;
+
+    let sub = if frame < seq.len() { &seq[frame..] } else { "" };
+    // `s[i:].ljust(len + (3 - len % 3), 'N')` -- note when len % 3 == 0 this pads
+    // by a further 3 Ns, which translate to X. Preserved.
+    let pad = 3 - sub.len() % 3;
+    let mut padded = String::with_capacity(sub.len() + pad);
+    padded.push_str(sub);
+    padded.extend(std::iter::repeat('N').take(pad));
+    translate(&padded)
+}
+
+#[cfg(test)]
+fn translate_to_match_collecting(hit: &str, target_prot: &str) -> String {
+    use crate::support::seq::{reverse_complement, translate};
+    use std::collections::HashSet;
+
+    if hit.is_empty() {
+        return String::new();
+    }
+
+    let dna_seqs = [hit.to_string(), reverse_complement(hit)];
     let mut proteins: Vec<String> = Vec::with_capacity(6);
     for i in 0..3 {
         for s in &dna_seqs {
             let sub = if i < s.len() { &s[i..] } else { "" };
-            // `s[i:].ljust(len + (3 - len % 3), 'N')` -- note when len % 3 == 0 this pads
-            // by a further 3 Ns, which translate to X. Preserved.
             let pad = 3 - sub.len() % 3;
             let mut padded = sub.to_string();
             padded.push_str(&"N".repeat(pad));
@@ -816,8 +917,6 @@ pub fn translate_to_match(hit: &str, target_prot: &str) -> String {
     let search_set: HashSet<&str> = (0..target_prot.len().saturating_sub(2))
         .map(|i| &target_prot[i..i + 3])
         .collect();
-
-    // `max(alignments, key=lambda x: x[1])` returns the FIRST maximum.
     let mut best = String::new();
     let mut best_n: i64 = -1;
     for target_sequence in proteins {
@@ -857,5 +956,87 @@ mod tests {
         let cig = split_cigar("3374=100I");
         assert_eq!(cig.last().map(|s| s.as_str()), Some("I"));
         assert_eq!(cig[cig.len() - 2], "100");
+    }
+
+    #[test]
+    fn terminal_insert_adjustment_matches_split_cigar_logic() {
+        for cigar in ["3374=100I", "4=", "4", "=4", "", "10I5=2I", "2I3=4I"] {
+            let cig = split_cigar(cigar);
+            let mut expected = 0i64;
+            if cig.last().map(|s| s.as_str()) == Some("I") {
+                expected += cig[cig.len() - 2].parse::<i64>().unwrap_or(0);
+            }
+            if cig.get(1).map(|s| s.as_str()) == Some("I") {
+                expected += cig[0].parse::<i64>().unwrap_or(0);
+            }
+            assert_eq!(terminal_insert_adjustment(cigar), expected, "{cigar}");
+        }
+    }
+
+    #[test]
+    fn normalise_found_dna_matches_replace_then_trim() {
+        for seq in ["", "NNN", "EXN", "NEXACXTEGNXE", "ACGT", "XXACEEGTXX"] {
+            let expected = seq.replace(['X', 'E'], "N").trim_matches('N').to_string();
+            assert_eq!(normalise_found_dna(seq), expected);
+        }
+    }
+
+    #[test]
+    fn segment_counts_match_individual_matches() {
+        let seg = "ACGTNXEacgtXXEE";
+        assert_eq!(
+            segment_counts(seg),
+            (
+                seg.matches('X').count(),
+                seg.matches('E').count(),
+                seg.matches('A').count()
+                    + seg.matches('C').count()
+                    + seg.matches('G').count()
+                    + seg.matches('T').count()
+            )
+        );
+    }
+
+    #[test]
+    fn filtered_gff_annotation_matches_collect_join() {
+        for text in [
+            "",
+            "##sequence-region ctg 1 10",
+            "a\n##sequence-region ctg 1 10\nb\n",
+            "a\nb",
+            "a\n##sequence-region\n##sequence-region x\nb",
+        ] {
+            let expected = text
+                .lines()
+                .filter(|l| !l.contains("##sequence-region"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(filtered_gff_annotation(text), expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn translate_padded_frame_preserves_ljust_padding_rule() {
+        assert_eq!(translate_padded_frame("ATGAAA", 0), "MKX");
+        assert_eq!(translate_padded_frame("ATGAA", 0), "MX");
+        assert_eq!(translate_padded_frame("ATGAAA", 1), "*X");
+        assert_eq!(translate_padded_frame("ATGAAA", 3), "KX");
+    }
+
+    #[test]
+    fn translate_to_match_matches_collect_then_first_max() {
+        for (hit, target) in [
+            ("ATGAAATAA", "MK*"),
+            ("TTTATGAAATAA", "MK*"),
+            ("ATGCCCAAATTT", "PF"),
+            ("NNNATGAAACCC", "MKP"),
+            ("ATGAAA", ""),
+        ] {
+            assert_eq!(
+                translate_to_match(hit, target),
+                translate_to_match_collecting(hit, target),
+                "{hit} {target}"
+            );
+        }
     }
 }

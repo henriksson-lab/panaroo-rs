@@ -19,16 +19,32 @@ use std::collections::HashMap;
 /// Regexes `CD-HIT version \d+\.\d+` out of the **repr of the CompletedProcess object**,
 /// not out of stdout — see [`crate::support::proc::run_shell_capture_repr`]. Exits the
 /// process with status 1 if cd-hit is not runnable.
-pub fn check_cdhit_version(cdhit_exec: &str) -> f64 {
-    let p = crate::support::proc::run_shell_capture_repr(&format!("{cdhit_exec} -h"));
-    // re.search(r'CD-HIT version \d+\.\d+', p) -- note this matches only two components,
-    // so "CD-HIT version 4.8.1" yields 4.8, not 4.8.1.
-    let version = find_version(&p);
-    match version {
-        Some(v) => v,
-        None => {
-            eprintln!("Need cd-hit to be runnable through: {cdhit_exec}");
-            std::process::exit(1);
+pub fn check_cdhit_version(
+    #[cfg_attr(feature = "cdhit-embedded", allow(unused_variables))] cdhit_exec: &str,
+) -> f64 {
+    #[cfg(feature = "cdhit-embedded")]
+    {
+        let p = format!("CD-HIT version {}", cdhit_rs::cdhit_common::CDHIT_VERSION);
+        find_version(&p).unwrap_or_else(|| {
+            panic!(
+                "cdhit-rs exported an unparsable CD-HIT_VERSION: {}",
+                cdhit_rs::cdhit_common::CDHIT_VERSION
+            )
+        })
+    }
+
+    #[cfg(not(feature = "cdhit-embedded"))]
+    {
+        let p = crate::support::proc::run_shell_capture_repr(&format!("{cdhit_exec} -h"));
+        // re.search(r'CD-HIT version \d+\.\d+', p) -- note this matches only two components,
+        // so "CD-HIT version 4.8.1" yields 4.8, not 4.8.1.
+        let version = find_version(&p);
+        match version {
+            Some(v) => v,
+            None => {
+                eprintln!("Need cd-hit to be runnable through: {cdhit_exec}");
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -64,14 +80,18 @@ fn find_version(text: &str) -> Option<f64> {
 ///
 /// `est` selects the nucleotide front-end, which differs from the protein one in its
 /// pre-parse defaults and alphabet -- see [`crate::cdhit_embedded`].
-fn dispatch_cdhit(cmd: &str, #[allow(unused_variables)] est: bool) {
+fn dispatch_cdhit(
+    cmd: &str,
+    #[allow(unused_variables)] est: bool,
+    #[allow(unused_variables)] quiet: bool,
+) {
     #[cfg(feature = "cdhit-embedded")]
     {
         let argv = crate::cdhit_embedded::argv_from_command(cmd);
         if est {
-            crate::cdhit_embedded::run_cd_hit_est_main(&argv);
+            crate::cdhit_embedded::run_cd_hit_est_main(&argv, quiet);
         } else {
-            crate::cdhit_embedded::run_cd_hit_main(&argv);
+            crate::cdhit_embedded::run_cd_hit_main(&argv, quiet);
         }
     }
     #[cfg(not(feature = "cdhit-embedded"))]
@@ -147,7 +167,7 @@ pub fn run_cdhit(
         cmd += " > /dev/null";
     }
 
-    dispatch_cdhit(&cmd, false);
+    dispatch_cdhit(&cmd, false, quiet);
 }
 
 /// `cdhit.py::run_cdhit_est`
@@ -213,7 +233,7 @@ pub fn run_cdhit_est(
         cmd += " > /dev/null";
     }
 
-    dispatch_cdhit(&cmd, true);
+    dispatch_cdhit(&cmd, true, quiet);
 }
 
 /// `cdhit.py::iterative_cdhit`
@@ -662,4 +682,20 @@ pub fn align_dna_cdhit(
     _quiet: bool,
 ) -> String {
     panic!("noimpl: cdhit::align_dna_cdhit")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_version_drops_the_patch_component_like_python() {
+        assert_eq!(find_version("CD-HIT version 4.8.1"), Some(4.8));
+    }
+
+    #[cfg(feature = "cdhit-embedded")]
+    #[test]
+    fn embedded_version_check_does_not_need_a_cd_hit_binary() {
+        assert_eq!(check_cdhit_version("definitely-not-cd-hit"), 4.8);
+    }
 }
