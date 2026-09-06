@@ -107,26 +107,16 @@ required-features = ["mafft-embedded"]
 [dependencies]
 anyhow = "1"
 # DECISION: this crate is not published to crates.io, and neither are the embedded
-# backends. Each is depended on wherever its latest code lives -- GitHub or a local
-# checkout -- and that location is expected to change as work moves between the two.
+# backends. Each embedded backend is pinned to the Git revision that was parity-checked
+# with this crate, rather than to a moving branch head.
 #
-# cd-hit: latest is the LOCAL checkout -- it now has the block-split fix that makes `-T`
-# actually parallelise (5x at -T 20; the GitHub rev ad8ac21 is effectively serial).
-# Switch back to `{ git = "https://github.com/henriksson-lab/cdhit-rs", rev = "..." }`
-# once that is pushed. Gated behind `cdhit-embedded` so the default build never sees it.
-# NOTE it is GPL-2.0-or-later, unlike this crate.
-cdhit-rs = { path = "/data/henriksson/github/claude/cdhit-rs", optional = true }
+# NOTE cdhit-rs is GPL-2.0-or-later, unlike this crate.
+cdhit-rs = { git = "https://github.com/henriksson-lab/cdhit-rs", rev = "a08a43244c0a2aaa1af3e19d473f3135afbdb940", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 # The `mafft-bin` crate of the fork, whose package name is `mafft-rs`. It carries the
 # CLI's flag->behaviour layer (`--auto` mode selection, `--adjustdirection` strand
 # detection), which is the part that must not be re-derived by a caller.
-#
-# MAFFT: latest is the LOCAL fork checkout (commit 2dfd189, which adds
-# `run_from_with_progress` / `SilentProgress`; not yet on GitHub). Switch to
-#   { git = "https://github.com/mahogny/rust-MAFFT", rev = "..." }
-# once that commit is pushed. `mafft-embedded` therefore builds only on a machine that
-# has this checkout, which is why CI does not enable it.
-mafft-rs = { path = "/home/mahogny/github/claude/rust-MAFFT/crates/mafft-bin", optional = true }
+mafft-rs = { git = "https://github.com/mahogny/rust-MAFFT", rev = "0b3955da3cbb52e21e91a65279ae54502febeba9", optional = true }
 indexmap = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

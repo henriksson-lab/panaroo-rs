@@ -3,9 +3,12 @@
 A faithful *mostly*-Rust translation of [Panaroo](https://github.com/gtonkinhill/panaroo), the
 prokaryotic pangenome pipeline.
 
-Note that this crate is not fully Rust yet. Translation of upstream dependencies is needed first. The aim of this translation is to improve speed over the original Panaroo code
+Note that this crate is not fully Rust yet. Some upstream dependencies are still invoked
+as external tools unless the optional embedded backend features are enabled. The aim of
+this translation is near-parity with higher speed.
 
-Also note that the Panaroo code output is not reproduced due to translation challenges and a suspected upstream bug
+Exact byte-parity is expected only in the single-threaded configuration (`-t 1`). Above
+that, upstream cd-hit itself can produce nondeterministic clustering output.
 
 **not yet tested enough**
 
@@ -54,22 +57,15 @@ cargo install --git https://github.com/henriksson-lab/panaroo-rs --features cli,
 ```
 
 **This crate is not published to crates.io, and neither are the embedded backends** — by
-decision, not oversight. Each is depended on wherever its latest code lives: cd-hit from
-GitHub, MAFFT from a local checkout of the fork until its latest commit is pushed. So
-`mafft-embedded` currently builds only on a machine with that checkout, which is also why
-CI enables `cli,cdhit-embedded` and not `mafft-embedded`.
+decision, not oversight. The embedded backends are pinned to Git revisions that were
+checked with this tree, so source installs can build the in-process configuration without
+local path dependencies.
 
-Both are verified byte-identical against the real tools on the parity suite — cd-hit on all
-13 output files at `-t 1`, MAFFT on all 5,096 per-gene alignments of this dataset. **That
-MAFFT figure does not yet generalise:** the parity work found a pre-existing gap-penalty
-scaling bug in rust-MAFFT's DNA pairwise phase (L-INS-i, the mode `--auto` selects for
-small clusters) that this dataset's conserved, indel-poor clusters happen not to trigger,
-while realistic clusters with indels do (~50%). A fix is in progress in the fork; until it
-lands and is re-verified, treat `mafft-embedded` as verified on this data, not in general.
-Both integrations
-drive the translated tool with the **same argv** the subprocess path would have built, so
-flag semantics have exactly one definition. Note that `cdhit-embedded` pulls a GPL-2.0
-dependency into the build.
+Both integrations drive the translated tool with the **same argv** the subprocess path
+would have built, so flag semantics have exactly one definition. On the current parity
+corpus, the fully embedded single-thread path is byte-identical except for
+`alignment_resume_state.json`'s wall-clock timestamp field. Note that `cdhit-embedded`
+pulls a GPL-2.0 dependency into the build.
 
 Requires Rust **1.85** or newer (a floor set by `clap` and `indexmap`, not by this code).
 
@@ -77,8 +73,9 @@ The binary is named `panaroo`, matching upstream's CLI so it is a drop-in replac
 **That means `cargo install` can shadow a Python Panaroo already on your `PATH`** — check
 `which -a panaroo` if you have both.
 
-`cd-hit` must be on `PATH`, and an aligner (`mafft` by default) if you use `--alignment`.
-These are invoked as subprocesses; none of them is bundled.
+Without the embedded features, `cd-hit` must be on `PATH`, and an aligner (`mafft` by
+default) if you use `--alignment`. Those tools are then invoked as subprocesses; none of
+the original third-party binaries is bundled.
 
 ## Verifying
 
@@ -93,52 +90,33 @@ See `tests/parity/README.md` for the rest of the suite.
 
 ## Performance
 
-Same input, same output — all 13 output files byte-identical — on 4 *M. tuberculosis*
-genomes (`--clean-mode strict`, 20 threads):
+Current embedded-backend measurements use the 4-genome *M. tuberculosis* parity input,
+`--clean-mode strict`, `-t 1`, and byte-identical outputs unless noted.
 
-| | Python Panaroo | panaroo-rs | panaroo-rs `+cdhit-embedded` |
-|---|---|---|---|
-| wall clock | 64.0 s | 42.1 s (**1.5×**) | 44.0 s (1.5×) |
-| CPU time (user + sys) | 612 s | 546 s (1.1×) | 530 s (1.2×) |
-| peak memory (tree PSS) | 1691 MB | 462 MB (**3.7×**) | **256 MB** (**6.6×**) |
+| workload | original tool/path | Rust path | result |
+|---|---:|---:|---:|
+| direct protein `cd-hit` | 7.02 s | 5.01 s | 1.40x faster |
+| direct nucleotide `cd-hit-est` | 23.74 s | 17.01 s | 1.40x faster |
+| 451 per-gene MAFFT alignments | ~311 s | 60.06-60.18 s | ~5.2x faster |
+| full Panaroo, `-a core`, `+cdhit-embedded,+mafft-embedded` | external reference | 78.93 s | timestamp-only diff |
 
-Three caveats, because a benchmark table without them is worse than none:
+The direct cd-hit comparisons use the exact intermediate FASTA files and flags generated
+by Panaroo. Both the clustered FASTA and `.clstr` outputs were byte-identical, so the
+current Rust cd-hit path is not slower than bundled CD-HIT on this workload despite doing
+the hot diagonal tests with SIMD.
 
-- **Single run, on a machine that was not idle** (load average 9.1 on 40 logical CPUs).
-  Wall-clock time is the number most contaminated by that; treat 1.5× as a rough
-  magnitude, not a measurement. Re-run with `tests/bench/run.sh ci -n 5 -T 20` on a quiet
-  box for figures with a measured spread.
-- **Almost all of this run is cd-hit, not our code.** `perf` puts **99.2%** of CPU inside
-  the `cd-hit`/`cd-hit-est` subprocesses and **0.85%** in everything this crate wrote. So the
-  wall-clock ratio is mostly a statement about process overhead and scheduling, and no
-  amount of optimisation here can move it. The third column runs a Rust cd-hit in-process
-  instead: same wall time, but **peak memory drops 462 → 256 MB** because it no longer forks
-  a 20-thread C process holding its own word tables.
-- **The CPU-time ratio (1.1×) is largely an artefact and should not be read as "the two
-  implementations do about the same amount of work".** Both sides invoke the same external
-  `cd-hit` binary 12 times per run with identical flags, and that binary is 60–75% of the
-  CPU time. Worse, cd-hit's own CPU cost is *superlinear in its thread count* — measured at
-  9.67 CPU-s with `-T 1` against 19.96 CPU-s with `-T 20`, a 2.07× penalty — so at `-t 20`
-  most of both CPU columns is shared work that no port can change, inflated by cd-hit's
-  threading overhead. The pipeline's own code is a minority of the total on this dataset.
-  A meaningful CPU-time comparison needs `-t 1`, or needs cd-hit's time subtracted out.
-- **The memory figure is tree PSS, not `time -v` max-RSS.** Max-RSS reports the largest
-  single process, which for both implementations is the same `cd-hit` child (389 vs 388 MB
-  — an artefact, not a result). The real difference is structural: Python parallelises by
-  forking a `multiprocessing` pool (26 processes here), Rust with threads in one process
-  (4 processes). Summed proportional set size across the whole process tree is what
-  captures that.
+The MAFFT figure is a corpus harness over Panaroo's unaligned gene clusters. It is a good
+measurement of the embedded alignment path used by this dataset, not a claim that
+`rust-MAFFT` is a complete replacement for every MAFFT mode and input shape.
 
-Hardware: Xeon Gold 6138, 1 socket, 20 physical / 40 logical cores. `-t 20` is one thread
-per physical core. Full harness, raw numbers and methodology: `tests/bench/`.
+A previous external-tool benchmark at `-t 20` measured 64.0 s for Python Panaroo, 42.1 s
+for `panaroo-rs`, and 44.0 s for `panaroo-rs +cdhit-embedded`, with all 13 no-alignment
+outputs byte-identical. Treat that as a throughput smoke test only: exact parity should be
+judged at `-t 1`, because threaded cd-hit can be nondeterministic.
 
-**What this configuration does *not* measure.** It runs without `-a/--alignment`, so mafft
-is never invoked by either side and the whole alignment stage is skipped. That stage is
-where the largest optimisation in the port lives — `output_sequence` used to re-parse the
-whole combined FASTA once per gene cluster, ~99.8 GB per run, now parsed once — worth
-**1.24× wall and 2.23× peak RSS** on `--alignment core`, and completely invisible here.
-Conversely, that path is dominated by ~5,100 mafft invocations, which are not ours to
-speed up. Neither configuration alone is representative.
+Hardware for these runs: Xeon Gold 6138, 1 socket, 20 physical / 40 logical cores. Full
+harness notes, raw numbers and rejected optimisation experiments live under
+`tests/bench/`.
 
 ## Reproducibility and how much parity to expect
 
@@ -252,7 +230,7 @@ Third-party licences, in full in `NOTICE.md`:
 | NetworkX, SciPy, NumPy, joblib, Biopython | BSD-3 / Biopython License | behaviour reimplemented |
 | CPython | PSF-2.0 | `dict` and number-formatting behaviour reimplemented |
 | intbitset | **LGPL-3.0-or-later** | behaviour reimplemented; not linked, not redistributed — see the note below |
-| cd-hit, MAFFT, MUSCLE, PRANK, Clustal Omega, FAMSA | GPL-2.0 / GPL-3.0 / BSD-3 | invoked as **subprocesses**, never linked, never redistributed |
+| cd-hit, MAFFT, MUSCLE, PRANK, Clustal Omega, FAMSA | GPL-2.0 / GPL-3.0 / BSD-3 | invoked as **subprocesses** by default; `cdhit-embedded` and `mafft-embedded` link Rust translations |
 
 Two points worth a lawyer's eye before release:
 
@@ -260,6 +238,6 @@ Two points worth a lawyer's eye before release:
   ordinary bitset over non-negative integers from the operations Panaroo calls, without
   consulting intbitset's source. Nothing here links against or redistributes it.
 - **The external aligners are GPL.** Running a GPL program as a subprocess is not linking,
-  so it does not impose the GPL on this code — but do not bundle those binaries into a
-  distribution without checking that separately.
-
+  so it does not impose the GPL on this code — but enabling `cdhit-embedded` links a
+  GPL-2.0-or-later Rust translation, and bundling any original third-party binaries needs
+  separate review.
