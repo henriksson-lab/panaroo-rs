@@ -3,9 +3,9 @@
 A faithful *mostly*-Rust translation of [Panaroo](https://github.com/gtonkinhill/panaroo), the
 prokaryotic pangenome pipeline.
 
-Note that this crate is not fully Rust yet. Some upstream dependencies are still invoked
-as external tools unless the optional embedded backend features are enabled. The aim of
-this translation is near-parity with higher speed.
+The recommended build is mostly Rust: Panaroo itself plus in-process Rust translations of
+cd-hit and MAFFT. Some less common aligners remain external tools when requested. The aim
+of this translation is near-parity with higher speed.
 
 Exact byte-parity is expected only in the single-threaded configuration (`-t 1`). Above
 that, upstream cd-hit itself can produce nondeterministic clustering output.
@@ -21,16 +21,17 @@ The command-line tool is behind the **`cli` feature, which is off by default**, 
 the crate's primary product is the library — the translated pipeline functions, which you
 can drive directly. A library consumer should not have to build `clap`.
 
-To get the `panaroo` executable, ask for the feature explicitly:
+To get the recommended `panaroo` executable with in-process cd-hit and MAFFT, ask for
+those features explicitly:
 
 ```sh
-cargo install panaroo-rs --features cli
+cargo install --git https://github.com/henriksson-lab/panaroo-rs --features cli,cdhit-embedded,mafft-embedded
 ```
 
 or from a checkout:
 
 ```sh
-cargo build --release --features cli   # vendored edlib is compiled by build.rs; no cmake, no libclang
+cargo build --release --features cli,cdhit-embedded,mafft-embedded
 ```
 
 To use it as a library instead, the default feature set is what you want:
@@ -40,30 +41,24 @@ To use it as a library instead, the default feature set is what you want:
 panaroo-rs = "0.1"        # library only, no clap
 ```
 
-### In-process cd-hit and MAFFT (optional)
+### In-process cd-hit and MAFFT
 
-By default both external tools are invoked exactly as upstream Panaroo invokes them: as
-subprocesses, from `PATH`. Two further features run them **in-process** instead, via Rust
-translations of each:
+For the current recommended build, cd-hit and MAFFT run **in-process** via Rust
+translations:
 
 | feature | replaces | source |
 |---|---|---|
 | `cdhit-embedded` | `cd-hit`, `cd-hit-est` | [henriksson-lab/cdhit-rs](https://github.com/henriksson-lab/cdhit-rs) (GPL-2.0-or-later) |
 | `mafft-embedded` | `mafft` | [mahogny/rust-MAFFT](https://github.com/mahogny/rust-MAFFT), a fork of luksgrin/rust-MAFFT (MIT AND BSD-3-Clause) |
 
-```sh
-# source build only -- see below
-cargo install --git https://github.com/henriksson-lab/panaroo-rs --features cli,cdhit-embedded,mafft-embedded
-```
-
 **This crate is not published to crates.io, and neither are the embedded backends** — by
 decision, not oversight. The embedded backends are pinned to Git revisions that were
 checked with this tree, so source installs can build the in-process configuration without
 local path dependencies.
 
-Both integrations drive the translated tool with the **same argv** the subprocess path
-would have built, so flag semantics have exactly one definition. On the current parity
-corpus, the fully embedded single-thread path is byte-identical except for
+Both integrations drive the translated tool with the **same argv** the original external
+tool invocation would have used, so flag semantics have exactly one definition. On the
+current parity corpus, the fully embedded single-thread path is byte-identical except for
 `alignment_resume_state.json`'s wall-clock timestamp field. Note that `cdhit-embedded`
 pulls a GPL-2.0 dependency into the build.
 
@@ -72,10 +67,6 @@ Requires Rust **1.85** or newer (a floor set by `clap` and `indexmap`, not by th
 The binary is named `panaroo`, matching upstream's CLI so it is a drop-in replacement.
 **That means `cargo install` can shadow a Python Panaroo already on your `PATH`** — check
 `which -a panaroo` if you have both.
-
-Without the embedded features, `cd-hit` must be on `PATH`, and an aligner (`mafft` by
-default) if you use `--alignment`. Those tools are then invoked as subprocesses; none of
-the original third-party binaries is bundled.
 
 ## Verifying
 
@@ -238,14 +229,13 @@ Third-party licences, in full in `NOTICE.md`:
 | NetworkX, SciPy, NumPy, joblib, Biopython | BSD-3 / Biopython License | behaviour reimplemented |
 | CPython | PSF-2.0 | `dict` and number-formatting behaviour reimplemented |
 | intbitset | **LGPL-3.0-or-later** | behaviour reimplemented; not linked, not redistributed — see the note below |
-| cd-hit, MAFFT, MUSCLE, PRANK, Clustal Omega, FAMSA | GPL-2.0 / GPL-3.0 / BSD-3 | invoked as **subprocesses** by default; `cdhit-embedded` and `mafft-embedded` link Rust translations |
+| cd-hit, MAFFT, MUSCLE, PRANK, Clustal Omega, FAMSA | GPL-2.0 / GPL-3.0 / BSD-3 | cd-hit and MAFFT are linked via Rust translations in the recommended build; other aligners remain external when requested |
 
 Two points worth a lawyer's eye before release:
 
 - **intbitset is the one copyleft dependency.** `src/support/intbitset.rs` implements an
   ordinary bitset over non-negative integers from the operations Panaroo calls, without
   consulting intbitset's source. Nothing here links against or redistributes it.
-- **The external aligners are GPL.** Running a GPL program as a subprocess is not linking,
-  so it does not impose the GPL on this code — but enabling `cdhit-embedded` links a
-  GPL-2.0-or-later Rust translation, and bundling any original third-party binaries needs
-  separate review.
+- **The aligner licensing needs review before release.** The recommended build links the
+  GPL-2.0-or-later `cdhit-rs` translation. Less common aligners remain external tools when
+  requested, and bundling any original third-party binaries needs separate review.
