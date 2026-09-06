@@ -648,7 +648,9 @@ pub fn panaroo_main() {
                 args.strict_codons,
                 args.input_files.len(),
                 args.hc_threshold,
-                args.subset.map(|x| x as usize),
+                args.subset.map(|x| {
+                    usize::try_from(x).expect("RuntimeError: --core_subset must be non-negative")
+                }),
                 false,
             );
         }

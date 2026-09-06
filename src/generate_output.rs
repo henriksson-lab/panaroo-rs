@@ -622,9 +622,11 @@ fn fasta_by_id(path: &str) -> HashMap<String, crate::support::seqio::SeqRecord> 
 
 /// `generate_output.py::get_core_gene_nodes`
 ///
-/// Nodes present in at least `threshold * num_isolates` genomes. With `subset`, takes a
-/// `random.sample` — which needs a Mersenne Twister clone for parity on that path
-/// (PORTING_PLAN.md §6.7).
+/// Nodes present in at least `threshold * num_isolates` genomes.
+///
+/// Upstream shuffles the candidates with CPython's `random.shuffle` before taking
+/// `subset`. This port deliberately chooses deterministic behaviour instead: keep graph
+/// node order and truncate to the requested count.
 pub fn get_core_gene_nodes(
     g: &Graph,
     threshold: f64,
@@ -648,13 +650,7 @@ pub fn get_core_gene_nodes(
                 core_nodes.len()
             );
         }
-        // `random.shuffle(core_nodes)` then `core_nodes[:subset]`. Reproducing which genes
-        // survive needs CPython's Mersenne Twister and its exact Fisher-Yates order; see
-        // PORTING_PLAN.md §6.7. Only reachable via --core_subset.
-        panic!(
-            "noimpl: --core_subset needs a CPython Mersenne Twister clone for \
-             random.shuffle parity (PORTING_PLAN.md §6.7)"
-        );
+        core_nodes.truncate(n);
     }
     core_nodes
 }
@@ -1093,8 +1089,63 @@ pub fn generate_summary_stats(output_dir: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::support::graph::{Graph, NodeAttrs};
+    use crate::support::intbitset::IntBitSet;
 
     // Expected values produced by the reference Python.
+
+    fn test_node(size: usize) -> NodeAttrs {
+        NodeAttrs {
+            size,
+            centroid: Vec::new(),
+            max_len_id: 0,
+            members: IntBitSet::default(),
+            seq_ids: std::collections::BTreeSet::new(),
+            has_end: false,
+            protein: Vec::new(),
+            dna: Vec::new(),
+            annotation: String::new(),
+            description: String::new(),
+            lengths: Vec::new(),
+            long_centroid_id: (0, String::new()),
+            paralog: false,
+            merged_dna: false,
+            prev_centroids: None,
+            name: None,
+            genome_ids: None,
+            gene_ids: None,
+            degrees: None,
+            high_var: None,
+            gml_late_attrs_before_name: false,
+        }
+    }
+
+    #[test]
+    fn core_subset_truncates_deterministically_in_graph_order() {
+        let mut g = Graph::new();
+        g.add_node(10, test_node(4));
+        g.add_node(20, test_node(3));
+        g.add_node(30, test_node(4));
+        g.add_node(40, test_node(1));
+
+        assert_eq!(get_core_gene_nodes(&g, 0.75, 4, None), vec![10, 20, 30]);
+        assert_eq!(get_core_gene_nodes(&g, 0.75, 4, Some(2)), vec![10, 20]);
+        assert_eq!(
+            get_core_gene_nodes(&g, 0.75, 4, Some(0)),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot subset core genes to 4, only 3 are available")]
+    fn core_subset_still_rejects_too_large_requests() {
+        let mut g = Graph::new();
+        g.add_node(10, test_node(4));
+        g.add_node(20, test_node(3));
+        g.add_node(30, test_node(4));
+
+        let _ = get_core_gene_nodes(&g, 0.75, 4, Some(4));
+    }
 
     #[test]
     fn seq_sample_key_matches_python_split_join_prefix() {

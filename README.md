@@ -10,8 +10,8 @@ of this translation is near-parity with higher speed.
 Exact byte-parity is expected only in the single-threaded configuration (`-t 1`). Above
 that, upstream cd-hit itself can produce nondeterministic clustering output.
 
-**not yet tested enough**
 
+* 2026-09-06: More optimization, primarily of upstream cd-hit and MAFFT. Initial use now possible but be vigilant to bugs
 * 2026-09-02: Initial translation
 
 
@@ -41,32 +41,6 @@ To use it as a library instead, the default feature set is what you want:
 panaroo-rs = "0.1"        # library only, no clap
 ```
 
-### In-process cd-hit and MAFFT
-
-For the current recommended build, cd-hit and MAFFT run **in-process** via Rust
-translations:
-
-| feature | replaces | source |
-|---|---|---|
-| `cdhit-embedded` | `cd-hit`, `cd-hit-est` | [henriksson-lab/cdhit-rs](https://github.com/henriksson-lab/cdhit-rs) (GPL-2.0-or-later) |
-| `mafft-embedded` | `mafft` | [mahogny/rust-MAFFT](https://github.com/mahogny/rust-MAFFT), a fork of luksgrin/rust-MAFFT (MIT AND BSD-3-Clause) |
-
-**This crate is not published to crates.io, and neither are the embedded backends** — by
-decision, not oversight. The embedded backends are pinned to Git revisions that were
-checked with this tree, so source installs can build the in-process configuration without
-local path dependencies.
-
-Both integrations drive the translated tool with the **same argv** the original external
-tool invocation would have used, so flag semantics have exactly one definition. On the
-current parity corpus, the fully embedded single-thread path is byte-identical except for
-`alignment_resume_state.json`'s wall-clock timestamp field. Note that `cdhit-embedded`
-pulls a GPL-2.0 dependency into the build.
-
-Requires Rust **1.85** or newer (a floor set by `clap` and `indexmap`, not by this code).
-
-The binary is named `panaroo`, matching upstream's CLI so it is a drop-in replacement.
-**That means `cargo install` can shadow a Python Panaroo already on your `PATH`** — check
-`which -a panaroo` if you have both.
 
 ## Verifying
 
@@ -185,6 +159,7 @@ across `PYTHONHASHSEED` values.
 | the patched reference | **byte-identical**, all 13 files, verified on four real *M. tuberculosis* genomes and on both `--alignment` modes |
 | stock Panaroo, same `PYTHONHASHSEED` | the same pangenome, differing by the Tier B bug fixes — **1–2 gene clusters out of ~5100** on our test data |
 | stock Panaroo, different `PYTHONHASHSEED` | the same pangenome; four files differ in element ordering only |
+| stock Panaroo with `--core_subset` | intentionally deterministic rather than random: this port takes the first N core genes in graph order, while upstream shuffles before slicing |
 
 If exact agreement with published stock-Panaroo numbers matters more than correctness,
 disable the Tier B patches in `tests/parity/reference/enabled.txt` and re-verify — the port
@@ -193,9 +168,6 @@ hide it.
 
 ### Known non-parity
 
-- `--core_subset` is not implemented. Reproducing which genes survive needs a CPython
-  Mersenne Twister clone for `random.shuffle`. It panics with that message rather than
-  silently diverging.
 - `alignment_resume_state.json` carries a wall-clock `started_at` and can never match; the
   comparator comes with that one field dropped.
 
@@ -212,12 +184,7 @@ separately; those entry points are **not** translated here, so this port does no
 
 ## License
 
-**MIT**, matching Panaroo. This is not a free choice: `panaroo-rs` is a derivative work of
-Panaroo (MIT, Copyright (c) 2019 Gerry Tonkin-Hill), so it must carry a compatible licence
-and preserve upstream's copyright notice. That notice is in `NOTICE.md`.
-
-The `LICENSE` file carries this project's MIT grant **and** reproduces upstream Panaroo's
-notice verbatim below it, as MIT requires of a derivative work.
+**MIT**, matching Panaroo
 
 Third-party licences, in full in `NOTICE.md`:
 
@@ -230,12 +197,3 @@ Third-party licences, in full in `NOTICE.md`:
 | CPython | PSF-2.0 | `dict` and number-formatting behaviour reimplemented |
 | intbitset | **LGPL-3.0-or-later** | behaviour reimplemented; not linked, not redistributed — see the note below |
 | cd-hit, MAFFT, MUSCLE, PRANK, Clustal Omega, FAMSA | GPL-2.0 / GPL-3.0 / BSD-3 | cd-hit and MAFFT are linked via Rust translations in the recommended build; other aligners remain external when requested |
-
-Two points worth a lawyer's eye before release:
-
-- **intbitset is the one copyleft dependency.** `src/support/intbitset.rs` implements an
-  ordinary bitset over non-negative integers from the operations Panaroo calls, without
-  consulting intbitset's source. Nothing here links against or redistributes it.
-- **The aligner licensing needs review before release.** The recommended build links the
-  GPL-2.0-or-later `cdhit-rs` translation. Less common aligners remain external tools when
-  requested, and bundling any original third-party binaries needs separate review.
