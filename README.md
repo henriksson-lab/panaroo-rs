@@ -109,10 +109,18 @@ The MAFFT figure is a corpus harness over Panaroo's unaligned gene clusters. It 
 measurement of the embedded alignment path used by this dataset, not a claim that
 `rust-MAFFT` is a complete replacement for every MAFFT mode and input shape.
 
-A previous external-tool benchmark at `-t 20` measured 64.0 s for Python Panaroo, 42.1 s
-for `panaroo-rs`, and 44.0 s for `panaroo-rs +cdhit-embedded`, with all 13 no-alignment
-outputs byte-identical. Treat that as a throughput smoke test only: exact parity should be
-judged at `-t 1`, because threaded cd-hit can be nondeterministic.
+The older 20-thread no-alignment benchmark is still useful as a throughput smoke test,
+but not as the parity baseline:
+
+| 20-thread no-alignment run | Python Panaroo | panaroo-rs | panaroo-rs `+cdhit-embedded` |
+|---|---:|---:|---:|
+| wall clock | 64.0 s | 42.1 s (1.52x faster) | 44.0 s (1.45x faster) |
+| CPU time (user + sys) | 612 s | 546 s (1.12x faster) | 530 s (1.15x faster) |
+| peak memory (tree PSS) | 1691 MB | 462 MB (3.7x lower) | 256 MB (6.6x lower) |
+
+That run used `--clean-mode strict`, `-t 20`, and no `-a/--alignment`, so MAFFT was never
+invoked. All 13 no-alignment outputs were byte-identical in that run, but exact parity
+should still be judged at `-t 1`, because threaded cd-hit can be nondeterministic.
 
 Hardware for these runs: Xeon Gold 6138, 1 socket, 20 physical / 40 logical cores. Full
 harness notes, raw numbers and rejected optimisation experiments live under
