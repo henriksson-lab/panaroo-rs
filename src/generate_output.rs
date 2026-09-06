@@ -21,7 +21,7 @@ type GeneAlignment = (
 );
 
 fn push_gaps(seq: &mut String, n: usize) {
-    seq.extend(std::iter::repeat('-').take(n));
+    seq.extend(std::iter::repeat_n('-', n));
 }
 
 fn write_delimited_cells<'a, W, I>(writer: &mut W, cells: I, sep: char)

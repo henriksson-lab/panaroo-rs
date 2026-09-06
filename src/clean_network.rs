@@ -758,10 +758,10 @@ pub fn merge_paralogs(g: &mut Graph) {
     for node in g.nodes() {
         if g.node(node).paralog {
             for centroid in &g.node(node).centroid {
-                if !paralog_centroids.contains_key(&centroid) {
+                if !paralog_centroids.contains_key(centroid) {
                     paralog_centroids.insert(centroid.clone(), Vec::new());
                 }
-                paralog_centroids.get_mut(&centroid).unwrap().push(node);
+                paralog_centroids.get_mut(centroid).unwrap().push(node);
             }
         }
     }

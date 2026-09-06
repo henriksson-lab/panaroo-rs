@@ -1273,7 +1273,7 @@ pub fn reverse_translate_sequences(
 
     for ((dna, protein_alignment), gene_name) in dna_sequences
         .into_iter()
-        .zip(protein_alignments.into_iter())
+        .zip(protein_alignments)
         .zip(gene_names.iter())
     {
         let protein = reorder_protein_alignment_to_match_dna(&dna, protein_alignment, gene_name);

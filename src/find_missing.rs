@@ -566,9 +566,9 @@ pub fn search_dna(
     for (i, db_raw) in [db_seq, rc.as_str()].into_iter().enumerate() {
         // add some Ns at the start and end to deal with fragments at the end of contigs
         let mut db = String::with_capacity(db_raw.len() + 2 * added_e_len);
-        db.extend(std::iter::repeat('E').take(added_e_len));
+        db.extend(std::iter::repeat_n('E', added_e_len));
         db.push_str(db_raw);
-        db.extend(std::iter::repeat('E').take(added_e_len));
+        db.extend(std::iter::repeat_n('E', added_e_len));
 
         let aln = align(
             search_sequence,
@@ -889,7 +889,7 @@ fn translate_padded_frame(seq: &str, frame: usize) -> String {
     let pad = 3 - sub.len() % 3;
     let mut padded = String::with_capacity(sub.len() + pad);
     padded.push_str(sub);
-    padded.extend(std::iter::repeat('N').take(pad));
+    padded.extend(std::iter::repeat_n('N', pad));
     translate(&padded)
 }
 
